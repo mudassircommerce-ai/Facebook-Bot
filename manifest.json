@@ -1,5 +1,5 @@
 {
- "version": 1,
+ "version": 7,
  "files": {
   "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
   "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
@@ -7,9 +7,9 @@
   "areas.py": "ed2a1eaa516dd3741ae41b0f6017710a4e2ce2c038e1287c4b66c757e44f03b0",
   "areas_cache.json": "5045780201dd96ac556055645c111ed416f331397ae80f711b29a75210c0a03a",
   "fb_joiner.py": "2c6a0421b83b41b2fd2d5f5108e3f4c3be4da6260aac495476cbe8ddc47be05a",
-  "license_common.py": "60a72d153ab696c04a81e4e09da2187c586048ccf71dcbeb507a1728da5fc251",
+  "license_common.py": "5d147f68abcd8d2bf745e35f368eb9e04c4d0be9ccc150708c78246bbdf50e6b",
   "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
   "updater.py": "cdb635c240fdfa9be39f211990bd30df2399e8fa2254e9297e85b344d201d522"
  },
- "sig": "FTAz1Q80VcCOy1BDWQA9Enpdewgw7Xg1-m_Xz5yshsnNxFbPBZtUHgzCttt09YSusbxoJKkQpEJDt3E-y9iJUG2IBTi3trdQUUGKVH6QzekjypTnUGIXkk5EhVt4FgMiw1Kp5rM0QUN2RzQ47GHfmnvAhcc9-JwOuNMdXv8EjVN8YJlVw1smgDgNdjNS9UPbjvZ9V_QoTOr_dFpP1jrnGrZfyHp0Myge6sZjEg1oAMQriv3O76ortzM3MzSQB-TTntJJdRR_JfFCR70yEKCsSstoPlcH6_E9KM3p75LElzRiHY3gTnQicynH2BPCQWORLtw0zx--v7fXFdq37ppvqg"
+ "sig": "aY-IFRP87G6nF35wBYWWt7ETqeYAWsSK1Oa-lzwl_phsHOcrtE-R8DYHd9b4b3UxTG2PCwXq1ldKe3vW-IW1Wl_9KV7fPD66pved4nP8jDneTtF3j8AMenEsptMcDa2iW0ITnUxdK32iJ3mjfMCXZ88pAJF1GQr5Ry10HxrfB8gBr2FqsmBaVxAr4H-emV_8aI2SKSKd1rl-KekpX6v7YnBaAUdzZHMOUFqgwpM24rOJbQROq6q1l1dwliksZr6BxPfs_rGNzW4m4ezDmuHpSiv8wyft965lV7E1AUif_F0A2uODpIXNg6ihV9sE5gSFWjyD1qV94tGhtvmEXa5o2w"
 }
