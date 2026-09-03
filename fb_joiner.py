@@ -1,0 +1,2818 @@
+#!/usr/bin/env python3
+"""
+FB Group Auto Joiner — Playwright + Tkinter UI
+"""
+
+import tkinter as tk
+import os
+import subprocess
+import sys
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+import threading
+import asyncio
+import queue
+import csv
+import json
+import random
+import re
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime
+from pathlib import Path
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+import pgeocode
+import numpy as np
+from geopy.geocoders import Nominatim
+from geopy.distance import geodesic
+
+from areas import AREAS
+
+# ── License + Usage tracking ────────────────────────────────
+# license_common.py = key verify karta hai (public key isme embedded).
+# activity.py       = usage/usage_<employee>.json likhta hai (owner ke
+#                     dashboard ke liye).
+import license_common as lic
+from activity import ActivityLog
+
+# Har 2 min pe heartbeat + license re-check
+LICENSE_RECHECK_SEC = 120
+
+# ── Multi-Account Support ────────────────────────────────────────
+# Har account apna alag browser profile (apna login) aur apni alag
+# log/joined/total files use karta hai — taake ek dusre se clash na ho.
+# Chalane ka tarika: `py fb_joiner.py 2` (account 2), `py fb_joiner.py 3` ...
+# Kuch na do to account 1 (default, purani files ke sath) chalta hai.
+INSTANCE = sys.argv[1] if len(sys.argv) > 1 else "1"
+SUFFIX   = "" if INSTANCE == "1" else f"_{INSTANCE}"
+
+# ── App folder ───────────────────────────────────────────────
+# Sab files (browser profile, logs, screenshots, area cache) is folder
+# ke andar rehti hain — dev mein script ka folder, packaged .exe mein
+# exe ka folder. Isse bot kisi bhi PC pe portable rehta hai.
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(APP_DIR)   # relative log/csv files bhi yahin banein
+
+# ── Config ────────────────────────────────────────────────────
+# Credentials ki zaroorat NAHI — Chrome profile use hoga
+PW_PROFILE_DIR = os.path.join(APP_DIR, f"pw_profile{SUFFIX}")
+
+ALL_AREAS_LABEL = "🌎 ALL AREAS (loop through all 65 areas)"
+AREA_CACHE_FILE = os.path.join(APP_DIR, "areas_cache.json")
+
+# Account 1 ke liye purana default page rakha hai (backward compatible).
+# Baaki accounts (2, 3, ...) mein khali rakhte hain — har account ka apna
+# page naam UI mein zaroor type karna hoga.
+DEFAULT_PAGE_NAME = "Edwin Junior" if INSTANCE == "1" else ""
+
+# Page ka direct link (URL) — yeh ho toh switch isi se hota hai (name-based
+# dropdown switching se zyada reliable). UI mein bhi change kar sakte ho.
+DEFAULT_PAGE_LINK = ""
+
+# In keywords wale groups KABHI join nahi karne — buy/sell/garage-sale
+# type groups mein service business ka koi faida nahi hota
+BLOCKED_GROUP_KEYWORDS = [
+    "buy", "sell", "sale", "selling", "marketplace", "flea market",
+    "swap", "trade", "free stuff", "classified", "auction",
+    "rummage", "thrift", "consignment", "deals",
+]
+
+# Muzammil ki di hui "don't-join" list — keyword form. Har naye bot folder
+# mein ye pehle se load hoti hai (bot_settings.json / block_keywords.txt),
+# aur UI ke box mein editable hai. Group ke naam + page title + URL slug
+# par substring match hota hai (case-insensitive).
+DEFAULT_DONT_JOIN = [
+    # buy / sell / marketplace / free
+    "buy and sell", "buy sell", "buy/sell", "b/s/t", "bst", "marketplace",
+    "free items", "free item", "free stuff", "free gifts", "free gift",
+    "swap", "trade", "trading post", "selling items", "for sale",
+    "garage sale", "yard sale", "estate sale", "rummage sale", "resale",
+    "re-sale", "classified", "classifieds", "buy nothing", "flea market",
+    "auction", "thrift", "consignment", "bargain",
+    # jobs / business promo / leads / contractors
+    "jobs", "job openings", "now hiring", "hiring", "employment", "careers",
+    "gig work", "business promotion", "promote your business",
+    "business networking", "network marketing", "advertise your business",
+    "advertising", "self promotion", "self-promotion", "shameless plug",
+    "customer leads", "lead generation", "sales leads", "referral group",
+    "contractor", "contractors", "subcontractor", "sub-contractor",
+    # lost & found pets
+    "lost and found", "lost & found", "lost pet", "found pet", "missing pet",
+    "lost dog", "lost cat", "finding pets", "pet finder", "rehome",
+    # sports (any)
+    "sports", "soccer", "football", "basketball", "baseball", "softball",
+    "hockey", "tennis", "golf", "volleyball", "cricket", "rugby", "lacrosse",
+    "wrestling", "boxing", "mma", "ufc", "cycling", "running club",
+    "marathon", "crossfit", "pickleball", "bowling league",
+    "fantasy football", "little league", "youth sports",
+    # gaming
+    "gaming", "gamers", "video game", "video games", "videogame", "xbox",
+    "playstation", "nintendo", "fortnite", "minecraft", "call of duty",
+    "roblox", "esports", "e-sports", "twitch", "pokemon",
+    # lgbtq
+    "lgbt", "lgbtq", "lgbtqia", "queer", "lesbian", "transgender",
+    "non-binary", "nonbinary", "pride community", "pride month",
+    "gay men", "gay community",
+    # non-english
+    "en espanol", "espanol", "grupo de", "latinos", "hispano", "hispanos",
+    "portugues", "vietnamese community", "chinese community",
+    # construction / housing / real estate
+    "construction", "house rent", "for rent", "houses for rent",
+    "apartments for rent", "rental", "rentals", "roommate", "roommates",
+    "sublet", "real estate", "realtor", "realty", "homes for sale",
+    "property for sale", "house for sale", "mls listings", "landlord",
+    # medical
+    "medicine", "medical", "pharmacy", "pharmaceutical", "doctors",
+    "dentist", "dental", "clinic", "nurses", "healthcare workers",
+    # vehicles
+    "cars for sale", "car for sale", "used cars", "auto sales", "car sales",
+    "vehicles for sale", "motorcycles for sale", "auto trader",
+    # goods
+    "shoes", "sneakers", "footwear", "clothing", "clothes", "apparel",
+    "fashion resale", "wardrobe", "furniture", "perfume", "fragrance",
+    "accessories", "jewelry for sale", "paintings", "drawings",
+    "art for sale", "artists market", "arts and crafts sale",
+    # food / drink / venues
+    "coffee lovers", "coffee shop", "bakery", "baked goods", "home bakers",
+    "food lovers", "foodies", "restaurant deals", "alcohol", "wine lovers",
+    "craft beer", "bars and clubs", "nightlife", "brewery",
+    # misc
+    "barber", "barbershop", "library", "book club", "cat lovers", "kittens",
+]
+
+# Canada ke groups skip karne ke liye — group header mein yeh alfaz hon
+# toh non-USA samjho
+CANADA_MARKERS = [
+    "canada", "canadian", "ontario", "british columbia", "alberta",
+    "manitoba", "saskatchewan", "quebec", "nova scotia",
+    "new brunswick", "newfoundland", "prince edward island",
+]
+
+JOIN_ANSWERS = [
+    "I'm a local resident looking to connect with my community and stay updated on local events and services.",
+    "I live nearby and love being part of local community groups. Looking forward to connecting with neighbors!",
+    "Community member here — excited to join and contribute to this local group!",
+    "I'm from the local area and interested in staying connected with my community.",
+    "Local resident just trying to stay connected with my neighborhood. Love finding community groups like this!",
+]
+BOT_ANSWERS = [
+    "No, I'm a real person! I'm a local community member looking to connect with neighbors.",
+    "Absolutely not! I'm a genuine local resident who enjoys being part of community groups.",
+    "Nope, definitely human! Just a local who loves staying connected with my community.",
+]
+BOT_KEYWORDS = ["bot","human","real person","not a bot","spam","automated","robot","verify"]
+
+# Sawaal ke hisaab se jawab — pehla matching rule jeet-ta hai.
+# Pehle har sawaal pe ek hi "local resident" wala jawab chipka diya
+# jata tha ("Are you a business owner?" -> "I'm a local resident" 🤦),
+# ab sawaal ka text parh ke munasib jawab milta hai.
+QA_RULES = [
+    # NOTE (Muzammil ka hukum): business (car detailing / duct cleaning) ka
+    # zikar KABHI nahi karna — kisi bhi jawab mein
+    (["business owner", "own a business", "are you a business", "business name",
+      "company name", "what business", "do you have a business", "business page",
+      "promoting any", "promoting a business", "promote a business", "promote your",
+      "advertising a business", "type of business", "represent a business"],
+     ["No, I'm not here to promote anything — just a local resident looking to be part of the community.",
+      "No, nothing to promote. I just want to stay connected with the local community."]),
+    (["not advertise", "no selling", "not sell", "no spam", "not spam", "not promote",
+      "will you please not", "promise not", "no soliciting", "not post anything for sale"],
+     ["Yes, absolutely — I won't post any ads or spam. I'm just here to be part of the community.",
+      "Of course, I agree. No selling or advertising from me — just here to connect with the community."]),
+    (["agree to", "rules", "guidelines", "follow the", "terms"],
+     ["Yes, I agree to the group rules.",
+      "Yes, I have read the rules and agree to follow them."]),
+    (["do you live", "live in", "are you local", "are you from", "where do you live",
+      "where are you from", "your city", "what city", "what town", "zip code",
+      "which area", "what area", "part of town"],
+     ["Yes, I live in the local area.",
+      "I'm based right here in the local area."]),
+    (["how did you hear", "how did you find", "who invited", "referred", "who told you"],
+     ["I found this group while searching for local community groups.",
+      "I came across this group while looking for local groups in the area."]),
+    (["why do you want", "why are you joining", "why would you like", "reason for joining",
+      "what brings you", "purpose", "object of", "reason for request", "object of request",
+      "why join", "why this group"],
+     ["I want to stay updated on local events and connect with people in the community.",
+      "I'd like to stay in touch with what's happening locally and be part of the community."]),
+]
+
+# Abhi kaunse city mein search ho rahi hai — "what city do you live in?"
+# jaise sawaalon ke jawab mein yehi naam jata hai (search_and_join set karta hai)
+CURRENT_CITY = ""
+
+# ── Gemini (AI answers to join questions) — KEY ROTATION ────
+# Bot ke paas kai Gemini API keys ho sakti hain. Jab ek key ka free-tier
+# rate-limit (HTTP 429 / RESOURCE_EXHAUSTED) lag jaye, bot us key ko thodi
+# der ke liye "cooldown" mein daal ke agli key pe switch kar deta hai —
+# taake AI answers din bhar chalte rahen. Saari keys thak jayein to us
+# sawaal ka jawab built-in template se chala jata hai (joining nahi rukti).
+GEMINI_MODEL = "gemini-flash-lite-latest"   # verified working; auto-switches if deprecated
+GEMINI_KEYS = []          # run_playwright() config se set hoti hai
+GEMINI_ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
+                   "models/{model}:generateContent")
+SETTINGS_FILE = os.path.join(APP_DIR, "bot_settings.json")
+
+_gk_idx = 0               # abhi kaunsi key use ho rahi hai
+_gk_cooldown = {}         # key -> monotonic time tak woh key skip karni hai
+_GK_COOLDOWN_SEC = 90     # 429 ke baad key kitni der aaram kare
+
+
+def load_settings() -> dict:
+    try:
+        return json.load(open(SETTINGS_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_settings(d: dict) -> None:
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=1)
+    except Exception:
+        pass
+
+
+def _split_keys(text: str) -> list:
+    """Newline / comma / space se alag karo, order + uniqueness rakho."""
+    out, seen = [], set()
+    for part in re.split(r"[\s,]+", (text or "").strip()):
+        p = part.strip()
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def resolve_block_keywords() -> list:
+    """
+    "Don't-join" keywords for pre-filling the box:
+      saved bot_settings.json  >  block_keywords.txt (bot folder)  >  DEFAULT_DONT_JOIN
+    """
+    s = load_settings().get("block_keywords", [])
+    if isinstance(s, str):
+        s = [x.strip() for x in s.splitlines()]
+    s = [x.strip().lower() for x in s if x and x.strip()]
+    if s:
+        return s
+    try:
+        p = os.path.join(APP_DIR, "block_keywords.txt")
+        if os.path.exists(p):
+            f = [ln.strip().lower() for ln in open(p, encoding="utf-8")
+                 if ln.strip() and not ln.strip().startswith("#")]
+            if f:
+                return f
+    except Exception:
+        pass
+    return list(DEFAULT_DONT_JOIN)
+
+
+def resolve_gemini_keys(ui_val: str = "") -> list:
+    """UI box > env GEMINI_API_KEY(S) > gemini_keys.txt / gemini_key.txt."""
+    keys = _split_keys(ui_val)
+    if keys:
+        return keys
+    for env in ("GEMINI_API_KEYS", "GEMINI_API_KEY"):
+        keys = _split_keys(os.environ.get(env, ""))
+        if keys:
+            return keys
+    for fn in ("gemini_keys.txt", "gemini_key.txt"):
+        try:
+            p = os.path.join(APP_DIR, fn)
+            if os.path.exists(p):
+                keys = _split_keys(open(p, encoding="utf-8").read())
+                if keys:
+                    return keys
+        except Exception:
+            pass
+    return []
+
+
+def _gemini_once(api_key, question, city):
+    """Ek key se ek call. Return: text | 'RATELIMIT' | None (aur error)."""
+    where = _city_pretty() or city or "the local area"
+    rules = (
+        "You are a real local resident in the USA"
+        + (f" living in {where}" if where else "")
+        + ". You are answering a Facebook group's membership screening question. "
+        "Reply in the first person, natural and friendly, 1-2 short sentences, "
+        "no greeting and no sign-off. NEVER mention any business, brand, company, "
+        "product, service, advertising, promotion, marketing or selling. If asked "
+        "whether you run or represent a business or want to promote something, say "
+        "no - you are just a local resident. If asked whether you are a bot or a "
+        "real person, say you are a real person. If asked which city/area you live "
+        f"in, say you live in {where}. Output ONLY the answer text, nothing else."
+    )
+    body = json.dumps({
+        "system_instruction": {"parts": [{"text": rules}]},
+        "contents": [{"parts": [{"text": f"Question: {question}\nAnswer:"}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 120},
+    }).encode("utf-8")
+    global GEMINI_MODEL
+    # Har key (AIza... ya AQ...) x-goog-api-key header se — Bearer 401 deta hai
+    headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+    for _try in range(2):
+        url = GEMINI_ENDPOINT.format(model=GEMINI_MODEL)
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            txt = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return txt.strip('"').strip() or None
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 403):
+                return "RATELIMIT"
+            if e.code == 404 and _try == 0:
+                # "no longer available ... use models/gemini-X.Y-flash" -> switch
+                try:
+                    msg = e.read().decode("utf-8", "replace")
+                except Exception:
+                    msg = ""
+                m = re.search(r"use\s+models/([a-zA-Z0-9._-]+)", msg)
+                if m and m.group(1) != GEMINI_MODEL:
+                    send_ui("log", text=f"   ↪ Gemini model {GEMINI_MODEL} deprecated "
+                                        f"→ switching to {m.group(1)}")
+                    GEMINI_MODEL = m.group(1)
+                    continue
+            return "ERROR"       # 400/500/etc — is key se na sahi, agli try karo
+        except Exception:
+            return "ERROR"       # timeout / network — agli key try karo
+    return "ERROR"
+
+
+def _gemini_sync(question, city):
+    """
+    Keys ke pool par rotate karke jawab lao. HAR sawaal ke liye Gemini
+    hi try hota hai — sirf tab template pe jate hain jab EK bhi key kaam
+    na kare (saari rate-limited / error).
+    """
+    global _gk_idx
+    keys = GEMINI_KEYS
+    n = len(keys)
+    if n == 0:
+        return None
+    now = time.monotonic()
+    i = _gk_idx % n
+    for tried in range(n):
+        k = keys[i]
+        if _gk_cooldown.get(k, 0) <= now:
+            res = _gemini_once(k, question, city)
+            if res == "RATELIMIT":
+                _gk_cooldown[k] = now + _GK_COOLDOWN_SEC
+                send_ui("log", text=f"   🔁 Gemini key #{i+1} rate-limited → next key")
+            elif res == "ERROR":
+                send_ui("log", text=f"   ↻ Gemini key #{i+1} error → next key")
+            elif res:
+                _gk_idx = i           # is key pe tik jao jab tak chale
+                return res
+        i = (i + 1) % n
+    send_ui("log", text="   ⏳ All Gemini keys busy — template answer this time")
+    return None
+
+
+async def gemini_answer(question):
+    if not GEMINI_KEYS:
+        return None
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _gemini_sync, question, CURRENT_CITY)
+
+
+def _gemini_pick_sync(question, options):
+    """Multiple-choice: Gemini se poochho kaunsa option — 0-based index return."""
+    numbered = "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
+    q = ("A Facebook group's membership form has a multiple-choice question. "
+         "You are a genuine local resident (never a business, never promoting, "
+         "a real person not a bot).\n\n"
+         f"Question / context:\n{question}\n\nOptions:\n{numbered}\n\n"
+         "Reply with ONLY the number of the single best option for you. Number:")
+    ans = _gemini_sync(q, CURRENT_CITY)
+    if not ans:
+        return None
+    m = re.search(r"\d+", ans)
+    if not m:
+        return None
+    idx = int(m.group()) - 1
+    return idx if 0 <= idx < len(options) else None
+
+
+async def gemini_pick_index(question, options):
+    if not GEMINI_KEYS or not options:
+        return None
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _gemini_pick_sync, question, list(options))
+
+def _city_pretty() -> str:
+    """'Acworth GA' -> 'Acworth, GA' (aakhri 2-letter state code ho toh comma)"""
+    c = CURRENT_CITY.strip()
+    parts = c.rsplit(" ", 1)
+    if len(parts) == 2 and len(parts[1]) == 2 and parts[1].isupper():
+        return f"{parts[0]}, {parts[1]}"
+    return c
+
+def pick_answer(question_text: str) -> str:
+    """Sawaal ke text se munasib jawab chuno; kuch match na ho toh generic"""
+    q = (question_text or "").lower()
+    # "KAUNSA city/ilaqa?" — yeh yes/no sawaal nahi, naam batana hota hai
+    if CURRENT_CITY and any(k in q for k in [
+            "what city", "which city", "what town", "which town",
+            "what area", "which area", "where do you live",
+            "where are you from", "your city", "zip code", "what part of"]):
+        return pick([f"I live in {_city_pretty()}.",
+                     f"I'm in {_city_pretty()} — right here in the local area."])
+    for keywords, answers in QA_RULES:
+        if any(k in q for k in keywords):
+            return pick(answers)
+    return pick(JOIN_ANSWERS)
+
+# Multiple-choice checkbox question mein in keywords wala option priority se
+# select hota hai (local resident persona ke sath match karne ke liye)
+CHECKBOX_PREFERENCE_KEYWORDS = ["yes, i live", "full time", "yes, i", "i live", "yes"]
+
+SEARCH_TEMPLATES = []  # ab use nahi hota
+
+LOG_FILE         = f"groups_log{SUFFIX}.csv"
+JOINED_FILE      = f"joined_groups{SUFFIX}.txt"
+TOTAL_FILE       = f"total_count{SUFFIX}.txt"
+TOTAL_SKIP_FILE  = f"total_skipped_count{SUFFIX}.txt"
+
+# ── Globals ───────────────────────────────────────────────────
+ui_queue   = queue.Queue()   # Playwright → UI
+stop_event = threading.Event()
+
+# ── Utilities ─────────────────────────────────────────────────
+
+def rand_delay(lo, hi):
+    return random.uniform(lo, hi)
+
+def pick(lst):
+    return random.choice(lst)
+
+def load_joined():
+    if not Path(JOINED_FILE).exists():
+        return set()
+    return set(open(JOINED_FILE).read().splitlines())
+
+def save_joined(url):
+    with open(JOINED_FILE, "a") as f:
+        f.write(url + "\n")
+
+def load_total():
+    if not Path(TOTAL_FILE).exists():
+        return 0
+    try:
+        return int(open(TOTAL_FILE).read().strip())
+    except:
+        return 0
+
+def save_total(n):
+    open(TOTAL_FILE, "w").write(str(n))
+
+def load_total_skipped():
+    if not Path(TOTAL_SKIP_FILE).exists():
+        return 0
+    try:
+        return int(open(TOTAL_SKIP_FILE).read().strip())
+    except:
+        return 0
+
+def save_total_skipped(n):
+    open(TOTAL_SKIP_FILE, "w").write(str(n))
+
+_pgeo = pgeocode.Nominatim('us')
+_geo  = Nominatim(user_agent="fb_group_joiner_v1", timeout=10)
+
+def load_area_cache() -> dict:
+    """areas_cache.json load karo (build_area_cache.py se pehle se generate hoti hai)."""
+    if not Path(AREA_CACHE_FILE).exists():
+        return {}
+    try:
+        return json.loads(Path(AREA_CACHE_FILE).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+_AREA_CACHE = load_area_cache()
+
+def get_nearby_cities(city_state: str, radius_miles: int = 50) -> list:
+    """
+    city_state (e.g. 'Raleigh NC') ke 50-mile radius mein saari unique
+    cities return karo, entered city included.
+    Sirf tab chalta hai jab area cache mein nahi mili (custom typed city) —
+    warna yeh live geocode + full-database scan bohot slow hai.
+    """
+    try:
+        loc = _geo.geocode(city_state + ", USA")
+        if not loc:
+            return [city_state]
+        center = (loc.latitude, loc.longitude)
+
+        # pgeocode se poora US zip code database load karo
+        data = _pgeo._data
+        if data is None or data.empty:
+            return [city_state]
+
+        data = data.dropna(subset=["latitude", "longitude", "place_name", "state_code"])
+        cities = set()
+        for _, row in data.iterrows():
+            dist = geodesic(center, (row["latitude"], row["longitude"])).miles
+            if dist <= radius_miles:
+                cities.add(f"{row['place_name']} {row['state_code']}")
+
+        result = sorted(cities) if cities else [city_state]
+        return result
+    except Exception as e:
+        return [city_state]
+
+def _area_state_code(area: str) -> str:
+    """'Charlotte North Carolina' -> 'NC' ; 'Waco Texas' -> 'TX' ;
+       'Washington DC' -> 'DC' ; 'New York' -> 'NY' ; 'Raleigh NC' -> 'NC'."""
+    a = (area or "").strip()
+    low = a.lower()
+    if low.endswith(" dc") or low == "washington dc":
+        return "DC"
+    parts = a.split()
+    if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isupper():
+        return parts[-1]
+    for code, name in STATE_NAMES.items():
+        if low.endswith(name.lower()):
+            return code
+    return {"new york": "NY", "new jersey": "NJ"}.get(low, "")
+
+
+def _target_state(target: str) -> str:
+    """'Belton TX' -> 'TX' ; 'Bell County TX' -> 'TX' ; kuch na mile toh ''."""
+    p = (target or "").split()
+    return p[-1] if p and len(p[-1]) == 2 and p[-1].isupper() else ""
+
+
+def get_targets_for_area(area: str, same_state_only: bool = True) -> list:
+    """
+    Ek area (e.g. 'Waco Texas') ke liye search targets (cities + counties)
+    return karo. Pehle cache check karo (fast), warna live calculate karo.
+    same_state_only=True -> sirf usi state ki cities/counties (border par
+    50-mile radius dusre state mein ghus jata tha — ab nahi).
+    """
+    cached = _AREA_CACHE.get(area)
+    if cached:
+        targets = list(cached.get("cities", [])) + list(cached.get("counties", []))
+    else:
+        targets = get_nearby_cities(area, 50)
+
+    if same_state_only:
+        st = _area_state_code(area)
+        if st:
+            in_state = [t for t in targets if _target_state(t) == st]
+            # Chhote areas (jaise DC) mein same-state filter ke baad bohot
+            # kam targets bachte hain — us surat mein filter chhoro
+            if len(in_state) >= 8:
+                targets = in_state
+    return targets
+
+def log_csv(area, name, url, status, members="?", privacy="?"):
+    exists = Path(LOG_FILE).exists()
+    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if not exists:
+            w.writerow(["Date","Time","Area","Group","URL","Members","Privacy","Status"])
+        w.writerow([
+            datetime.now().strftime("%Y-%m-%d"),
+            datetime.now().strftime("%H:%M:%S"),
+            area, name, url, members, privacy, status
+        ])
+
+def send_ui(msg_type, **kwargs):
+    ui_queue.put({"type": msg_type, **kwargs})
+    # Log lines file mein bhi save karo — debugging ke liye (UI band ho
+    # jaye toh bhi history mile)
+    if msg_type == "log":
+        try:
+            with open(f"ui_log{SUFFIX}.txt", "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().strftime('%H:%M:%S')} {kwargs.get('text','')}\n")
+        except:
+            pass
+
+# ── Playwright Helpers ────────────────────────────────────────
+
+async def sleep(sec):
+    await asyncio.sleep(sec)
+
+async def human_type(el, text):
+    """React-compatible typing"""
+    await el.focus()
+    await sleep(0.3)
+    try:
+        # contenteditable divs
+        await el.evaluate("""
+            (el, txt) => {
+                el.innerHTML = '';
+                el.focus();
+                document.execCommand('insertText', false, txt);
+            }
+        """, text)
+    except:
+        await el.fill(text)
+    await sleep(0.3)
+
+async def _is_checkbox_checked(chk):
+    try:
+        aria = await chk.get_attribute("aria-checked")
+    except:
+        aria = None
+    if aria is not None:
+        return aria == "true"
+    try:
+        return await chk.is_checked()
+    except:
+        return False
+
+async def _click_checkbox(chk) -> bool:
+    """FB ke custom checkbox kabhi seedhe click se tick nahi hote — kai
+    tareeqe try karo aur verify karo ke sach mein tick hua."""
+    for attempt in range(3):
+        try:
+            await chk.click(timeout=2500)
+        except Exception:
+            try:
+                await chk.evaluate("el => el.click()")
+            except Exception:
+                pass
+        await sleep(rand_delay(0.3, 0.6))
+        if await _is_checkbox_checked(chk):
+            return True
+        # label / parent click
+        for xp in ["xpath=ancestor::label[1]", "xpath=.."]:
+            try:
+                await chk.locator(xp).first.click(timeout=1200)
+                await sleep(0.3)
+                if await _is_checkbox_checked(chk):
+                    return True
+            except Exception:
+                pass
+    return await _is_checkbox_checked(chk)
+
+async def tick_checkboxes(page):
+    """
+    Facebook har sawaal ke checkboxes (single agree-checkbox ya
+    multiple-choice options) DOM mein ek jaisi hi tarah render karta hai —
+    isliye hum unhe unke sibling-group ke hisaab se pehchante hain:
+    - Group mein sirf 1 checkbox = standalone (jaise "I agree to rules") -> tick karo
+    - Group mein 1+ checkboxes = multiple-choice question -> sirf EK
+      best-matching option select karo, baaki chhoro (warna contradictory
+      answers jaate hain aur bot jaisa dikhta hai)
+    """
+    ticked = 0
+
+    groups = await page.evaluate("""
+        () => {
+            // Sirf join-dialog ke andar dhundo — page ke baaqi checkboxes
+            // (notifications waghera) ko haath nahi lagana
+            const scope = document.querySelector('div[role="dialog"]') || document;
+            const raw = [...scope.querySelectorAll('input[type="checkbox"], [role="checkbox"]')]
+                .filter(el => el.offsetParent !== null);
+            // Facebook kabhi ek hi checkbox ko 2 tareeqon se render karta hai
+            // (chhupa hua <input type=checkbox> + upar custom [role=checkbox]
+            // wrapper). Dono ko count karne se ek hi option "2-item group"
+            // lagta hai — isliye nested duplicates hata ke sirf outer
+            // (visible/clickable) element rakho.
+            const boxes = raw.filter(el => !raw.some(other => other !== el && other.contains(el)));
+            boxes.forEach((el, i) => el.setAttribute('data-fbjoin-idx', String(i)));
+
+            const isBox = 'input[type="checkbox"], [role="checkbox"]';
+            function countBoxesIn(el) {
+                return el.querySelectorAll(isBox).length;
+            }
+
+            // Har checkbox ke liye sabse chhota ancestor dhundo jisme 2+
+            // checkboxes hon — yehi uska "question wrapper" hai. Agar 10
+            // level tak upar bhi koi ancestor 2+ checkboxes nahi rakhta,
+            // to yeh checkbox standalone hai (jaise "I agree to rules").
+            const wrapperOf = boxes.map(el => {
+                let cur = el.parentElement;
+                let depth = 0;
+                while (cur && depth < 10) {
+                    if (countBoxesIn(cur) >= 2) return cur;
+                    cur = cur.parentElement;
+                    depth++;
+                }
+                return null;
+            });
+
+            const groups = [];
+            const seen = new Map();
+            boxes.forEach((el, i) => {
+                const w = wrapperOf[i];
+                if (w === null) {
+                    groups.push({idx: [i], q: ""});
+                } else {
+                    if (!seen.has(w)) {
+                        const g = {idx: [], q: (w.innerText || "").trim().slice(0, 500)};
+                        seen.set(w, g);
+                        groups.push(g);
+                    }
+                    seen.get(w).idx.push(i);
+                }
+            });
+            return groups;
+        }
+    """)
+
+    for group in groups:
+        idx_list = group.get("idx", []) if isinstance(group, dict) else group
+        qtext    = group.get("q", "") if isinstance(group, dict) else ""
+        items = []
+        already_checked = False
+        for idx in idx_list:
+            chk = page.locator(f'[data-fbjoin-idx="{idx}"]').first
+            if await _is_checkbox_checked(chk):
+                already_checked = True
+            text = ""
+            for xp in ["xpath=ancestor::label[1]", "xpath=.."]:
+                try:
+                    text = (await chk.locator(xp).inner_text(timeout=400)).strip()
+                    if text:
+                        break
+                except:
+                    pass
+            items.append((chk, text))
+
+        if already_checked or not items:
+            continue
+
+        if len(items) == 1:
+            # Standalone checkbox — jaise "I agree to the rules"
+            if await _click_checkbox(items[0][0]):
+                ticked += 1
+                send_ui("log", text="   ☑️ Ticked agree-checkbox")
+            await sleep(rand_delay(0.4, 0.8))
+        else:
+            # Multiple-choice — pehle Gemini se poochho kaunsa option
+            opts = [it[1] for it in items]
+            chosen = None
+            gi = await gemini_pick_index(qtext or "Which option applies to you?", opts)
+            if gi is not None:
+                chosen = items[gi]
+                send_ui("log", text=f"   🤖 AI picked option: {opts[gi][:50]}")
+            if chosen is None:
+                low = [o.lower() for o in opts]
+                for kw in CHECKBOX_PREFERENCE_KEYWORDS:
+                    j = next((n for n, t in enumerate(low) if kw in t), None)
+                    if j is not None:
+                        chosen = items[j]
+                        break
+            if chosen is None:
+                chosen = items[0]
+            if await _click_checkbox(chosen[0]):
+                ticked += 1
+            await sleep(rand_delay(0.4, 0.8))
+
+    return ticked
+
+async def handle_questions(page):
+    await sleep(1.5)
+
+    # SIRF join-questions dialog ke andar kaam karo. Pehle poore page ke
+    # text boxes uthate the — jis se script group ke COMMENT BOX mein
+    # jawab type kar deti thi (posts ke neeche comments ho rahe the!).
+    # Dialog nahi hai = koi sawaal nahi = kuch mat karo.
+    # Dialog kabhi kabhi dair se render hota hai — ~6 sec tak intezar karo.
+    # Aur VISIBLE dialog dhundo (.first kabhi DOM mein pade hue chhupe
+    # dialog ko pakar leta tha jo is_visible fail karta tha).
+    dlg = None
+    for _ in range(4):
+        try:
+            for cand in await page.locator('div[role="dialog"]').all():
+                if await cand.is_visible():
+                    dlg = cand
+                    break
+        except:
+            pass
+        if dlg:
+            break
+        await sleep(1.5)
+    if dlg is None:
+        # Yeh normal bhi ho sakta hai (bohat se groups sawaal nahi poochte),
+        # lekin screenshot rakhte hain taake confirm kar saken
+        send_ui("log", text="   ℹ️ No question dialog appeared (joined without questions?)")
+        try:
+            await ss(page, "no_dialog")
+        except:
+            pass
+        return False
+
+    # Dialog aksar SKELETON (khali grey placeholders) ke sath khulta hai
+    # aur asal sawaal baad mein load hote hain — screenshot se confirm hua.
+    # Inputs/checkboxes render hone tak ~8 sec intezar karo, warna hum
+    # khali dialog parh ke "question text not found" pe pahunch jate hain.
+    for _ in range(8):
+        try:
+            n = await dlg.locator(
+                'textarea, [role="textbox"], div[contenteditable="true"], '
+                'input[type="checkbox"], [role="checkbox"]'
+            ).count()
+            if n > 0:
+                await sleep(0.8)  # thoda aur — text bhi paint ho jaye
+                break
+        except:
+            pass
+        await sleep(1)
+
+    ticked = await tick_checkboxes(page)
+    if ticked:
+        send_ui("log", text=f"☑️  Ticked {ticked} checkbox(es)")
+
+    inputs = (
+        await dlg.locator('textarea').all() +
+        await dlg.locator('[role="textbox"]').all() +
+        await dlg.locator('div[contenteditable="true"]').all()
+    )
+    if not inputs and not ticked:
+        # Dialog toh hai lekin na koi text-question mila na checkbox —
+        # screenshot se pata chalega yeh kaunsa dialog tha
+        send_ui("log", text="   ⚠️ Dialog found but no question inputs — screenshot saved")
+        try:
+            await ss(page, "dialog_no_inputs")
+        except:
+            pass
+    # Fallback ke liye: dialog ke poore text mein se "?" wali lines —
+    # i-wan input ka sawaal aksar i-wan "?" line hoti hai (order same hai)
+    try:
+        dlg_text = await dlg.inner_text(timeout=2000)
+    except:
+        dlg_text = ""
+    q_lines = [l.strip() for l in dlg_text.split("\n")
+               if "?" in l and len(l.strip()) > 5]
+
+    answered = 0
+    q_idx = 0
+    for inp in inputs:
+        if not await inp.is_visible():
+            continue
+        # Sawaal ka text dhundo — input se upar climb karo aur pehla aisa
+        # ancestor lo jisme input ke placeholder ("Write an answer...")
+        # ke ilawa asli text ho. Pehle ancestor::div[3..6] ka inner_text
+        # lete the, jo aksar sirf placeholder hi hota tha — isliye rules
+        # kabhi match nahi hote the aur har sawaal pe generic jawab jata tha.
+        ctx = ""
+        try:
+            ctx = await inp.evaluate("""
+                (el) => {
+                    const junk = /^(write an answer|your answer|answer here|type your answer|required|optional|you must answer|answer all|answer the question|only .* can see|admins? (and|&) moderators|\\d+\\s*\\/\\s*\\d+)/i;
+                    const ownText = ((el.value || el.innerText || '') + '').trim();
+                    let cur = el.parentElement, depth = 0;
+                    while (cur && depth < 15) {
+                        const lines = (cur.innerText || '').split('\\n')
+                            .map(s => s.trim())
+                            .filter(s => s.length > 2)
+                            .filter(s => !junk.test(s))
+                            .filter(s => !ownText || s !== ownText);
+                        if (lines.length) {
+                            // "?" wali line asli sawaal hone ka sabse bara ishara hai
+                            const q = lines.find(s => s.includes('?'));
+                            return q || lines[0];
+                        }
+                        cur = cur.parentElement;
+                        depth++;
+                    }
+                    return '';
+                }
+            """)
+            ctx = (ctx or "").strip().lower()
+        except:
+            ctx = ""
+        # Fallback: DOM-climb se kuch na mila (ya jo mila usme "?" nahi —
+        # aksar woh dialog ki hidayat hoti hai, sawaal nahi) toh dialog-text
+        # ki "?" lines order ke hisaab se use karo (pehla input = pehla sawaal)
+        if q_idx < len(q_lines) and (not ctx or "?" not in ctx):
+            ctx = q_lines[q_idx].lower()
+        q_idx += 1
+        # Phir bhi khali? Poora dialog-text + screenshot save karo taake
+        # agli baar extraction isi data se theek ki ja sake
+        if not ctx:
+            try:
+                with open(f"debug_dialog_text{SUFFIX}.txt", "a", encoding="utf-8") as df:
+                    df.write(f"\n--- {datetime.now()} ---\n{dlg_text}\n")
+                await ss(page, "question_text_not_found")
+            except:
+                pass
+        # Sawaal ka text — ctx na mile to bhi jo mila (dialog-text lines /
+        # poora dialog) usi se Gemini ko poochho, taake HAR sawaal ka
+        # jawab AI de. Sirf tab template jab ctx bhi khali ho AUR keys
+        # kaam na karein.
+        q_for_ai = (ctx
+                    or (q_lines[q_idx - 1] if 0 <= q_idx - 1 < len(q_lines) else "")
+                    or (dlg_text or "").strip()[:400])
+        is_bot = any(k in (ctx or q_for_ai.lower()) for k in BOT_KEYWORDS)
+        answer = None
+        if GEMINI_KEYS and q_for_ai.strip():
+            answer = await gemini_answer(q_for_ai)
+        if answer:
+            send_ui("log", text=f"   🤖 AI answer ({GEMINI_MODEL})")
+        elif is_bot:
+            answer = pick(BOT_ANSWERS)
+            send_ui("log", text="🤖 Bot-check question — answering like a human")
+        else:
+            answer = pick_answer(ctx)
+        # Log mein dikhao kaunsa sawaal mila (pehle 60 chars) — taake
+        # ghalat jawab jaye toh pata chale kyun
+        q_preview = ctx.split("\n")[0][:60] if ctx else "(question text not found)"
+        send_ui("log", text=f"   ❓ Q: {q_preview}")
+        send_ui("log", text=f"   💬 A: {answer[:60]}...")
+        await human_type(inp, answer)
+        answered += 1
+        await sleep(rand_delay(0.8, 1.5))
+
+    if answered:
+        send_ui("log", text=f"📝 Answered {answered} question(s)")
+
+    # Submit — sirf dialog ke andar wala button
+    for sel in ['[aria-label="Submit"]','[aria-label="Send"]','button[type="submit"]']:
+        try:
+            btn = dlg.locator(sel).first
+            if await btn.is_visible(timeout=1500):
+                await btn.click()
+                await sleep(1.5)
+                return True
+        except:
+            pass
+    return ticked > 0 or answered > 0
+
+async def get_group_info(page):
+    html  = await page.content()
+    text  = await page.inner_text("body")
+    members = 0
+    for pat in [r'([\d,]+\.?\d*[KkMm]?)\s*[Mm]embers?', r'"memberCount":([\d]+)']:
+        m = re.search(pat, html)
+        if m:
+            # _parse_count khali/ajeeb string pe crash nahi karta, 0 deta hai
+            members = _parse_count(m.group(1))
+            if members:
+                break
+    privacy     = "Private" if "Private group" in text else "Public" if "Public group" in text else "Unknown"
+    already     = any(x in text for x in ["Leave group","Joined","Member ·","You're a member"])
+    page_blocked = "doesn't allow Pages to join" in text or "does not allow Pages to join" in text
+    # Members post nahi kar sakte (admin-only / announcement group) — pre-join
+    # best-effort detection, Facebook ke alfaz badalte rehte hain
+    tl = text.lower()
+    post_disabled = any(m in tl for m in [
+        "only admins can post", "only admins and moderators can post",
+        "only moderators can post", "only admins and mods can post",
+        "admins have turned off posting", "posting has been turned off",
+        "posting is turned off", "members can't post", "members cannot post",
+        "posting turned off for members",
+    ])
+    # Canada check — sirf page ka upar wala hissa (header/about) dekho,
+    # poora body nahi (kisi post mein "Canada" ka zikar false-positive
+    # na ban jaye)
+    header_txt = text[:600].lower()
+    is_canada  = any(m in header_txt for m in CANADA_MARKERS)
+    return members, privacy, already, page_blocked, is_canada, post_disabled
+
+def _parse_count(s: str) -> int:
+    """'1.2K' -> 1200, '3M' -> 3000000, '234' -> 234, '1,050' -> 1050"""
+    s = s.replace(",", "").strip()
+    m = re.match(r'([\d.]+)\s*([KkMm])?', s)
+    if not m:
+        return 0
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return 0
+    suf = (m.group(2) or "").lower()
+    if suf == "k":
+        val *= 1_000
+    elif suf == "m":
+        val *= 1_000_000
+    return int(val)
+
+async def check_group_activity(page) -> bool:
+    """
+    Public group ke recent posts check karo:
+    - Kam se kam 2 posts mein 5+ likes ya 2+ comments honi chahiye
+    - "1.2K" / "3M" jaise Facebook shorthand numbers bhi parse hote hain
+    Naapne ka tareeqa: DOM se (aria-label + text), kyunke FB likes screen
+    pe sirf bare number dikhata hai aur text-regex unhe miss kar deta tha.
+    Faisla insaani andaz mein:
+    - 2+ posts pe koi bhi engagement (3+ reactions ya 1+ comment) = zinda group
+    - YA ek bhi post strongly active ho (10+ reactions / 5+ comments)
+    - Counts parhe hi na ja saken = group ki ghalti nahi, allow
+    """
+    try:
+        # Scroll karo taake posts + counts hydrate ho jayein
+        await page.keyboard.press("End")
+        await sleep(1.2)
+        await page.keyboard.press("End")
+        await sleep(1.0)
+
+        stats = await page.evaluate("""
+            () => {
+                const parseCount = (s) => {
+                    if (!s) return 0;
+                    const m = String(s).replace(/,/g, '').match(/([\\d.]+)\\s*([KkMm])?/);
+                    if (!m) return 0;
+                    let v = parseFloat(m[1]) || 0;
+                    const suf = (m[2] || '').toLowerCase();
+                    if (suf === 'k') v *= 1000;
+                    if (suf === 'm') v *= 1000000;
+                    return Math.round(v);
+                };
+                const posts = [...document.querySelectorAll('[role="article"]')]
+                    .filter(a => !a.parentElement.closest('[role="article"]'))
+                    .slice(0, 10);
+                const out = [];
+                for (const post of posts) {
+                    let reactions = 0, comments = 0, sawCounter = false;
+                    for (const el of post.querySelectorAll('[aria-label]')) {
+                        const al = el.getAttribute('aria-label') || '';
+                        const m = al.match(/([\\d.,]+\\s*[KkMm]?)\\s*(?:people|person|reaction|others?)/i)
+                               || (/reacted|reaction/i.test(al) && al.match(/([\\d.,]+\\s*[KkMm]?)/));
+                        if (m) { reactions = Math.max(reactions, parseCount(m[1])); sawCounter = true; }
+                    }
+                    const txt = post.innerText || '';
+                    let m = txt.match(/all reactions:?\\s*([\\d.,]+\\s*[KkMm]?)/i);
+                    if (m) { reactions = Math.max(reactions, parseCount(m[1])); sawCounter = true; }
+                    m = txt.match(/([\\d.,]+\\s*[KkMm]?)\\s*comments?/i);
+                    if (m) { comments = parseCount(m[1]); sawCounter = true; }
+                    out.push({ reactions, comments, sawCounter });
+                }
+                return out;
+            }
+        """)
+
+        if len(stats) < 2:
+            return True  # Posts load nahi hue — judge nahi kar sakte
+
+        counted = [p for p in stats if p["sawCounter"]]
+        if not counted:
+            return True  # Counts parh hi nahi sake — allow
+
+        active = sum(1 for p in counted if p["reactions"] >= 3 or p["comments"] >= 1)
+        strong = any(p["reactions"] >= 10 or p["comments"] >= 5 for p in counted)
+        ok = active >= 2 or strong
+        send_ui("log", text=f"   📊 Engagement: {active}/{len(counted)} active posts"
+                            f"{' (strong post mila)' if strong and active < 2 else ''}"
+                            f" → {'OK' if ok else 'LOW'}")
+        return ok
+    except:
+        return True   # Error pe group skip mat karo
+
+async def click_join(page):
+    # Method 1: aria-label
+    for sel in [
+        '[aria-label="Join group"]',
+        '[aria-label="Join Group"]',
+        '[aria-label="Join this group"]',
+        'a[aria-label="Join group"]',
+        'a[aria-label="Join Group"]',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=1500):
+                await btn.click()
+                return True
+        except:
+            pass
+
+    # Method 2: any visible button/link jisme "join" text ho
+    for el in await page.locator('[role="button"], button, a').all():
+        try:
+            if not await el.is_visible(timeout=300):
+                continue
+            txt = (await el.inner_text(timeout=400)).strip().lower()
+            if txt in ("join group", "join", "join this group", "join group ·"):
+                await el.click()
+                return True
+        except:
+            pass
+
+    # Method 3: JavaScript se dhundo — "Join" wala koi bhi clickable element
+    try:
+        clicked = await page.evaluate("""
+            () => {
+                let els = [...document.querySelectorAll('[role="button"], button, a')];
+                for (let el of els) {
+                    let t = (el.innerText || '').trim().toLowerCase();
+                    if (t === 'join group' || t === 'join') {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+        """)
+        if clicked:
+            return True
+    except:
+        pass
+
+    return False
+
+SS_DIR = os.path.join(APP_DIR, f"debug_ss{SUFFIX}")
+Path(SS_DIR).mkdir(exist_ok=True)
+
+async def ss(page, name):
+    try:
+        await page.screenshot(path=f"{SS_DIR}\\{name}.png", full_page=False)
+    except:
+        pass
+
+async def dismiss_popups(page):
+    """
+    Facebook kabhi kabhi interstitial popups dikhata hai (jaise 'You're in
+    sleep mode') jo bacha ke rakha button-click ko intercept kar lete hain.
+    Yeh function un popups ko band karta hai taake age ka automation
+    (page switch, join, etc.) block na ho.
+    """
+    closed_any = False
+    checks = [
+        ('text="You\'re in sleep mode"', 'div[role="button"]:has-text("OK")'),
+        ('text="Turn on notifications"', '[aria-label="Not Now"]'),
+        ('text="Welcome to your new Page!"', 'text="Use Page"'),
+        ('text="Welcome back"', 'text="OK"'),
+    ]
+    for marker_sel, close_sel in checks:
+        try:
+            marker = page.locator(marker_sel).first
+            if await marker.is_visible(timeout=800):
+                btn = page.locator(close_sel).first
+                if await btn.is_visible(timeout=1000):
+                    await btn.click()
+                    await sleep(0.5)
+                    closed_any = True
+        except:
+            pass
+    # Generic dialog close button (X) — agar koi aur unexpected dialog khula ho
+    try:
+        close_x = page.locator('[aria-label="Close"]').first
+        if await close_x.is_visible(timeout=500):
+            await close_x.click()
+            await sleep(0.3)
+            closed_any = True
+    except:
+        pass
+    if closed_any:
+        send_ui("log", text="   💤 Closed a popup")
+    return closed_any
+
+async def _verify_switched(page, page_name):
+    """
+    Confirm karo ke switch actually ho gaya — "Manage Page" heading (Page
+    mode ka pakka sign), composer placeholder, ya top-left active profile
+    name mein se koi bhi page_name match kare to switch ho chuka hai.
+    """
+    try:
+        manage_page = page.locator('text="Manage Page"').first
+        if await manage_page.is_visible(timeout=1500):
+            name_near = page.locator(f'text="{page_name}"').first
+            if await name_near.is_visible(timeout=1000):
+                return True
+    except:
+        pass
+    try:
+        composer = page.locator(f'[aria-label*="{page_name}"], [placeholder*="{page_name}"]').first
+        if await composer.is_visible(timeout=1500):
+            return True
+    except:
+        pass
+    try:
+        # Left sidebar sabse upar wala item hamesha active profile hota hai
+        top_item = page.locator(f'text="{page_name}"').first
+        if await top_item.is_visible(timeout=1500):
+            box = await top_item.bounding_box()
+            if box and box["y"] < 150:
+                return True
+    except:
+        pass
+    return False
+
+async def switch_via_link(page, page_link, page_name=""):
+    """
+    Page ke direct link se switch karo — sab se reliable tareeqa:
+    1. Page ka URL kholo
+    2. Agar "Manage Page" pehle se dikh raha hai -> already switched
+    3. Warna "Switch Now" / "Switch" button dhundo aur dabao
+    4. Verify karo ke "Manage Page" aa gaya
+    """
+    try:
+        send_ui("log", text=f"   🔗 Switching via page link: {page_link}")
+        await page.goto(page_link, wait_until="domcontentloaded", timeout=20000)
+        await sleep(rand_delay(2, 3))
+        await dismiss_popups(page)
+        await ss(page, "01_link_opened")
+
+        # Already page mode mein hain?
+        try:
+            if await page.locator('text="Manage Page"').first.is_visible(timeout=2000):
+                send_ui("log", text="   ✅ Already in page mode")
+                return True
+        except:
+            pass
+
+        # Switch button dhundo (Facebook alag alag labels use karta hai)
+        for sw_sel in ['[aria-label="Switch Now"]', 'text="Switch Now"',
+                       '[aria-label="Switch to Page"]', 'text="Switch to Page"',
+                       'div[aria-label="Switch"][role="button"]',
+                       '[role="button"]:has-text("Switch")']:
+            try:
+                sw = page.locator(sw_sel).first
+                if await sw.is_visible(timeout=1500):
+                    await sw.click()
+                    await sleep(rand_delay(2, 3))
+                    break
+            except:
+                pass
+
+        await dismiss_popups(page)
+        # Verify — SPA dheere load hota hai, 16 sec tak retry
+        for _ in range(8):
+            try:
+                if await page.locator('text="Manage Page"').first.is_visible(timeout=1500):
+                    send_ui("log", text="   ✅ Switched via link (verified)")
+                    return True
+            except:
+                pass
+            if page_name and await _verify_switched(page, page_name):
+                send_ui("log", text="   ✅ Switched via link (verified)")
+                return True
+            await sleep(2)
+
+        await ss(page, "02_link_switch_fail")
+        send_ui("log", text="   ⚠️  Link opened but switch could not be verified")
+        return False
+    except Exception as e:
+        send_ui("log", text=f"   link switch error: {str(e)[:80]}")
+        return False
+
+async def switch_to_page(page, page_name):
+    """Facebook profile se Page pe switch karo"""
+    try:
+        await dismiss_popups(page)
+        await ss(page, "01_before_switch")
+        # Method 1: Top-right corner mein account/profile menu dhundo
+        # Facebook different aria-labels use karta hai — JS se dhundo
+        menu_clicked = False
+        top_btns = await page.evaluate("""
+            () => {
+                let btns = [];
+                document.querySelectorAll('[role="button"], button, a').forEach(el => {
+                    let rect = el.getBoundingClientRect();
+                    if (rect.top < 70 && rect.right > window.innerWidth - 200 && rect.width > 0) {
+                        btns.push({
+                            label: el.getAttribute('aria-label') || '',
+                            tag: el.tagName,
+                            x: Math.round(rect.x + rect.width/2),
+                            y: Math.round(rect.y + rect.height/2),
+                        });
+                    }
+                });
+                return btns;
+            }
+        """)
+        send_ui("log", text=f"   Top-right buttons: {[b['label'] for b in top_btns if b['label']]}")
+
+        # Known account menu labels
+        acct_labels = ["Account", "Your profile", "Account controls and privacy",
+                       "Account menu", "Profile"]
+        for btn_info in top_btns:
+            if any(lbl.lower() in btn_info['label'].lower() for lbl in acct_labels):
+                await page.mouse.click(btn_info['x'], btn_info['y'])
+                menu_clicked = True
+                await sleep(1.5)
+                break
+
+        # If label match nahi hua — rightmost top button click karo
+        if not menu_clicked and top_btns:
+            rightmost = max(top_btns, key=lambda b: b['x'])
+            await page.mouse.click(rightmost['x'], rightmost['y'])
+            await sleep(1.5)
+            menu_clicked = True
+
+        if menu_clicked:
+            await sleep(0.5)
+            await ss(page, "02_after_menu_click")
+            # Page naam dhundo — lekin SIRF dropdown ke andar (top-right,
+            # narrow region), warna sidebar shortcuts mein wahi naam ka
+            # koi aur link galti se match ho jata hai
+            match = await page.evaluate("""
+                (name) => {
+                    const els = [...document.querySelectorAll('span, div')];
+                    for (const el of els) {
+                        const txt = (el.innerText || '').trim();
+                        if (txt !== name) continue;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        // Dropdown hamesha top-right corner ke neeche khulta hai
+                        if (rect.top > 50 && rect.top < 650 && rect.left > window.innerWidth * 0.5) {
+                            return {x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2)};
+                        }
+                    }
+                    return null;
+                }
+            """, page_name)
+            if match:
+                await page.mouse.click(match["x"], match["y"])
+                await sleep(1.5)
+                await ss(page, "03_after_profile_click")
+                # Facebook kabhi confirmation dialog dikhata hai
+                # ("Switch to X?" -> Switch/Continue button) — lekin SIRF
+                # dialog ke andar click karo, warna page ke kisi aur element
+                # pe ghalat click ho jata hai
+                try:
+                    dlg = page.locator('[role="dialog"]').first
+                    if await dlg.is_visible(timeout=1500):
+                        for confirm_sel in ['div[aria-label="Switch"]', 'text="Switch"',
+                                             'button:has-text("Switch")', '[aria-label="Continue"]',
+                                             'text="Continue"']:
+                            try:
+                                cbtn = dlg.locator(confirm_sel).first
+                                if await cbtn.is_visible(timeout=1000):
+                                    await cbtn.click()
+                                    await sleep(rand_delay(2, 3))
+                                    break
+                            except:
+                                pass
+                except:
+                    pass
+                await sleep(1)
+                await dismiss_popups(page)
+                # Facebook SPA dheere load hota hai — verify ko 16 second
+                # tak retry karo (har 2 sec), ek hi baar check karne se
+                # kaamyab switch bhi "fail" lag raha tha
+                for _ in range(8):
+                    if await _verify_switched(page, page_name):
+                        send_ui("log", text=f"   ✅ Selected '{page_name}' from menu (verified)")
+                        return True
+                    await sleep(2)
+                await ss(page, "04_verify_fail")
+                send_ui("log", text=f"   ⚠️  Clicked '{page_name}' but switch not verified")
+
+            # "See all profiles" link dhundo
+            for see_sel in ['text="See all profiles"', 'text="See all"', '[href*="profiles"]']:
+                try:
+                    see_all = page.locator(see_sel).first
+                    if await see_all.is_visible(timeout=1500):
+                        await see_all.click()
+                        await sleep(1.5)
+                        match2 = await page.evaluate("""
+                            (name) => {
+                                const els = [...document.querySelectorAll('span, div')];
+                                for (const el of els) {
+                                    const txt = (el.innerText || '').trim();
+                                    if (txt !== name) continue;
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect.width > 0 && rect.height > 0) {
+                                        return {x: Math.round(rect.x + rect.width/2), y: Math.round(rect.y + rect.height/2)};
+                                    }
+                                }
+                                return null;
+                            }
+                        """, page_name)
+                        if match2:
+                            await page.mouse.click(match2["x"], match2["y"])
+                            await sleep(rand_delay(2, 3))
+                            send_ui("log", text=f"   ✅ Selected '{page_name}' via 'See all profiles'")
+                            return True
+                        break
+                except:
+                    pass
+
+        # Method 2: facebook.com/pages — "Your Pages" se switch karo
+        await page.goto("https://www.facebook.com/pages/?category=your_pages&ref=bookmarks",
+                        wait_until="domcontentloaded", timeout=15000)
+        await sleep(2)
+        await dismiss_popups(page)
+        page_link = page.locator(f'a:has-text("{page_name}")').first
+        if await page_link.is_visible(timeout=3000):
+            href = await page_link.get_attribute("href")
+            if href:
+                await page.goto(href, wait_until="domcontentloaded", timeout=15000)
+                await sleep(2)
+                # "Switch to Page" button
+                for sw_sel in ['[aria-label="Switch Now"]', 'text="Switch Now"',
+                               'text="Switch to Page"', '[aria-label="Switch to Page"]']:
+                    try:
+                        sw = page.locator(sw_sel).first
+                        if await sw.is_visible(timeout=2000):
+                            await sw.click()
+                            await sleep(rand_delay(2, 3))
+                            return True
+                    except:
+                        pass
+
+        # Method 3: Direct URL
+        page_slug = page_name.lower().replace(" ", "")
+        await page.goto(f"https://www.facebook.com/{page_slug}", wait_until="domcontentloaded")
+        await sleep(2)
+        await dismiss_popups(page)
+        for sw_sel in ['[aria-label="Switch Now"]', 'text="Switch Now"', 'text="Switch to Page"']:
+            try:
+                sw = page.locator(sw_sel).first
+                if await sw.is_visible(timeout=2000):
+                    await sw.click()
+                    await sleep(rand_delay(2, 3))
+                    return True
+            except:
+                pass
+
+        return False
+    except Exception as e:
+        send_ui("log", text=f"   switch error: {e}")
+        return False
+
+async def select_page(page, page_name):
+    if not page_name:
+        return
+    await sleep(1.2)
+    try:
+        opt = page.locator(f'text="{page_name}"').first
+        if await opt.is_visible(timeout=2000):
+            await opt.click()
+            await sleep(0.8)
+            confirm = page.locator('[aria-label="Confirm"]').first
+            if await confirm.is_visible(timeout=1500):
+                await confirm.click()
+    except:
+        pass
+
+# ── Apply Facebook Filters in sidebar ────────────────────────
+
+def city_only(city_state: str) -> str:
+    """'Raleigh NC' → 'Raleigh'  |  'Charlotte, NC' → 'Charlotte'"""
+    parts = city_state.replace(",", " ").split()
+    if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isupper():
+        return " ".join(parts[:-1])
+    return city_state.strip()
+
+def state_only(city_state: str) -> str:
+    """'Omaha NE' → 'NE'  |  'Raleigh, NC' → 'NC'"""
+    parts = city_state.replace(",", " ").split()
+    if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isupper():
+        return parts[-1]
+    return ""
+
+# State abbreviation → full name
+STATE_NAMES = {
+    "AL":"Alabama","AK":"Alaska","AZ":"Arizona","AR":"Arkansas","CA":"California",
+    "CO":"Colorado","CT":"Connecticut","DE":"Delaware","FL":"Florida","GA":"Georgia",
+    "HI":"Hawaii","ID":"Idaho","IL":"Illinois","IN":"Indiana","IA":"Iowa",
+    "KS":"Kansas","KY":"Kentucky","LA":"Louisiana","ME":"Maine","MD":"Maryland",
+    "MA":"Massachusetts","MI":"Michigan","MN":"Minnesota","MS":"Mississippi",
+    "MO":"Missouri","MT":"Montana","NE":"Nebraska","NV":"Nevada","NH":"New Hampshire",
+    "NJ":"New Jersey","NM":"New Mexico","NY":"New York","NC":"North Carolina",
+    "ND":"North Dakota","OH":"Ohio","OK":"Oklahoma","OR":"Oregon","PA":"Pennsylvania",
+    "RI":"Rhode Island","SC":"South Carolina","SD":"South Dakota","TN":"Tennessee",
+    "TX":"Texas","UT":"Utah","VT":"Vermont","VA":"Virginia","WA":"Washington",
+    "WV":"West Virginia","WI":"Wisconsin","WY":"Wyoming","DC":"District of Columbia",
+}
+
+async def apply_fb_filters(page, city):
+    """
+    Facebook search page pe left sidebar filters apply karo:
+    - Location: sirf city naam type karo, suggestion select karo
+    - Public groups toggle hamesha OFF (sirf private join karein)
+    """
+    await sleep(rand_delay(1, 1.5))
+
+    city_name  = city_only(city)   # "Raleigh NC" → "Raleigh"
+    state_abbr = state_only(city)  # "Raleigh NC" → "NC"
+    state_full = STATE_NAMES.get(state_abbr, "")  # "NC" → "North Carolina"
+
+    try:
+        loc_input = None
+        for sel in [
+            'div[aria-label*="Location"]',
+            'input[placeholder*="ity"]',
+            'input[placeholder*="ocation"]',
+            '[aria-label*="Location"] input',
+        ]:
+            el = page.locator(sel).first
+            try:
+                if await el.is_visible(timeout=1500):
+                    loc_input = el
+                    break
+            except:
+                pass
+
+        if loc_input:
+            await loc_input.click()
+            await sleep(0.5)
+            # Pehle field clear karo
+            await loc_input.press("Control+a")
+            await loc_input.press("Delete")
+            await sleep(0.3)
+            # Sirf city naam type karo (autocomplete trigger hogi)
+            await loc_input.type(city_name, delay=80)
+            await sleep(rand_delay(1.5, 2.5))
+
+            # Suggestion dropdown ka intezaar karo
+            suggestion_sels = [
+                '[role="option"]',
+                '[role="listbox"] li',
+                'ul[role="listbox"] [role="option"]',
+            ]
+            chosen = False
+            for s_sel in suggestion_sels:
+                opts = await page.locator(s_sel).all()
+                if not opts:
+                    continue
+                # Sirf USA wala suggestion select karo — state abbreviation
+                # ya full name match hona zaroori hai. Kabhi bhi blindly
+                # pehla option select nahi karna (warna France/kisi aur
+                # country ka wrong location lag jata hai)
+                for opt in opts:
+                    try:
+                        opt_text = (await opt.inner_text(timeout=600)).strip()
+                        is_usa = (
+                            (state_abbr and state_abbr in opt_text) or
+                            (state_full and state_full.lower() in opt_text.lower()) or
+                            "United States" in opt_text or
+                            ", US" in opt_text
+                        )
+                        if is_usa:
+                            await opt.click()
+                            await sleep(1)
+                            send_ui("log", text=f"📍 Location: {opt_text.strip()}")
+                            chosen = True
+                            break
+                    except:
+                        pass
+                if chosen:
+                    break
+
+            if not chosen:
+                # Koi USA suggestion nahi mila — dropdown band karo.
+                # Bina USA filter ke search karna = Canada/doosre mulkon
+                # ke groups aa jate hain, isliye yeh city hi skip hogi.
+                try:
+                    await loc_input.press("Escape")
+                except:
+                    pass
+                await loc_input.press("Control+a")
+                await loc_input.press("Delete")
+                send_ui("log", text=f"   ⚠️  No USA suggestion for '{city_name}'")
+            return chosen
+        return False
+    except Exception as e:
+        send_ui("log", text=f"   location filter error: {e}")
+        return False
+
+    # Public + Private dono — koi toggle nahi badlna
+
+# ── Main Join Logic ───────────────────────────────────────────
+
+async def join_one_group(page, url, name, area, config):
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await sleep(rand_delay(1, 2))
+        await dismiss_popups(page)
+
+        members, privacy, already, page_blocked, is_canada, post_disabled = \
+            await get_group_info(page)
+
+        if page_blocked:
+            send_ui("log", text=f"⛔ Pages not allowed: {name}")
+            log_csv(area, name, url, "page_not_allowed", members, privacy)
+            return "skipped"
+
+        # Members post nahi kar sakte -> is business ke liye bekaar
+        if config.get("skip_no_post", True) and post_disabled:
+            send_ui("log", text=f"🚫 Members can't post here, skip: {name}")
+            log_csv(area, name, url, "posting_disabled", members, privacy)
+            return "skipped"
+
+        # Buy/sell type + employee ke apne "don't-join" keywords
+        try:
+            title = (await page.title()).lower()
+        except:
+            title = ""
+        check_text = f"{name.lower()} {title}"
+        all_blocked = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
+        bad_kw = next((kw for kw in all_blocked if kw and kw in check_text), None)
+        if bad_kw:
+            send_ui("log", text=f"⏭️  Blocked keyword ('{bad_kw}'), skip: {name}")
+            log_csv(area, name, url, "blocked_keyword", members, privacy)
+            return "skipped"
+
+        if is_canada:
+            send_ui("log", text=f"🍁 Canada group, skip: {name}")
+            log_csv(area, name, url, "non_usa", members, privacy)
+            return "skipped"
+
+        if already:
+            send_ui("log", text=f"⏭️  Already member: {name}")
+            log_csv(area, name, url, "already_member", members, privacy)
+            return "skipped"
+
+        if members > 0 and members < config["min_members"]:
+            send_ui("log", text=f"⏭️  Skip ({members} members < {config['min_members']}): {name}")
+            log_csv(area, name, url, "low_members", members, privacy)
+            return "skipped"
+
+        # ── Public / Private ratio ──────────────────────────
+        # Employee set karta hai kitne % public join karne hain (baaqi private).
+        # Jo type target se aage nikal jaye usko skip karo jab tak doosra
+        # catch up na kare — session bhar mein ratio balance ho jata hai.
+        pub_pct = config.get("public_pct", 30)
+        jp = config.get("_jp", 0)
+        jv = config.get("_jpriv", 0)
+        tot = jp + jv
+        if privacy == "Public":
+            if pub_pct <= 0:
+                send_ui("log", text=f"⚖️  100% private set — skip public: {name}")
+                log_csv(area, name, url, "ratio_public", members, privacy)
+                return "skipped"
+            if tot >= 4 and (jp + 1) / (tot + 1) > pub_pct / 100.0 + 0.05:
+                send_ui("log", text=f"⚖️  Public quota reached ({jp}/{tot}), skip: {name}")
+                log_csv(area, name, url, "ratio_public", members, privacy)
+                return "skipped"
+        elif privacy == "Private":
+            if pub_pct >= 100:
+                send_ui("log", text=f"⚖️  100% public set — skip private: {name}")
+                log_csv(area, name, url, "ratio_private", members, privacy)
+                return "skipped"
+            if tot >= 4 and (jv + 1) / (tot + 1) > (100 - pub_pct) / 100.0 + 0.05:
+                send_ui("log", text=f"⚖️  Private quota reached ({jv}/{tot}), skip: {name}")
+                log_csv(area, name, url, "ratio_private", members, privacy)
+                return "skipped"
+
+        # Public group mein engagement check karo — neeche scroll kar ke
+        # dekhte hain ke posts pe reactions/comments aa rahe hain ya nahi.
+        # (K/M numbers ab sahi parse hote hain, is liye bade groups pe
+        # bhi chalta hai)
+        if privacy == "Public":
+            active = await check_group_activity(page)
+            if not active:
+                send_ui("log", text=f"⏭️  Skip (low activity/admin-only): {name}")
+                log_csv(area, name, url, "low_activity", members, privacy)
+                return "skipped"
+
+        clicked = await click_join(page)
+        if not clicked:
+            send_ui("log", text=f"⏭️  Join button not found, skip: {name}")
+            log_csv(area, name, url, "no_button", members, privacy)
+            return "skipped"
+
+        await sleep(rand_delay(1.5, 2.5))
+        await select_page(page, config.get("page_name", ""))
+        await handle_questions(page)
+
+        if privacy == "Public":
+            config["_jp"] = config.get("_jp", 0) + 1
+        elif privacy == "Private":
+            config["_jpriv"] = config.get("_jpriv", 0) + 1
+        _jp, _jv = config.get("_jp", 0), config.get("_jpriv", 0)
+        _tt = _jp + _jv
+        _mix = f" | mix {round(100*_jp/_tt)}% pub / {round(100*_jv/_tt)}% priv" if _tt else ""
+        send_ui("log", text=f"✅ Joined: {name} ({members} members | {privacy}){_mix}")
+        log_csv(area, name, url, "joined", members, privacy)
+        save_joined(url)
+        return "joined"
+
+    except Exception as e:
+        import traceback
+        with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+            ef.write(f"\n--- {datetime.now()} | {name} ---\n{e}\n{traceback.format_exc()}\n")
+        send_ui("log", text=f"⏭️  Error: {str(e)[:80]}")
+        log_csv(area, name, url, "error")
+        return "skipped"
+
+async def search_and_join(page, city, already_joined, config, joined_today=0):
+    global CURRENT_CITY
+    CURRENT_CITY = city
+    joined  = 0
+    skipped = 0
+    limit   = config["daily_limit"]
+
+    if stop_event.is_set() or joined_today >= limit:
+        return joined, skipped
+
+    send_ui("target", text=city)
+
+    # Pura target (city + state, ya county + state) se search — sirf city
+    # naam se search karna galat results deta tha
+    query = city
+    url   = f"https://www.facebook.com/search/groups/?q={query.replace(' ','%20')}"
+    send_ui("log", text=f"🔍 Searching: '{query}'")
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await sleep(rand_delay(1.5, 2.5))
+    except:
+        return joined, skipped
+
+    # Location filter sirf city search ke liye lagao — county search mein
+    # nahi (county naam is filter ke sath match nahi karta, galat results dete)
+    if "County" not in city:
+        filter_ok = await apply_fb_filters(page, city)
+        if not filter_ok:
+            # USA location filter nahi laga — bina filter ke Canada/wrong
+            # country ke groups aate hain, isliye yeh city chhor do
+            send_ui("log", text=f"   ⏭️  Skipping '{city}' — USA location filter could not be applied")
+            return joined, skipped
+    else:
+        send_ui("log", text=f"   ℹ️  County search — skipping location filter")
+
+    # Scroll to load more groups
+    for _ in range(4):
+        await page.keyboard.press("End")
+        await sleep(rand_delay(0.7, 1.2))
+
+    # Group links + har link ke search-card ka text bhi utha lo — member
+    # count wahan pehle se likha hota hai ("12K members" waghera), toh
+    # chhote groups ko kholne ki zaroorat hi nahi (10-15 sec/group bachta hai)
+    cards = await page.evaluate("""
+        () => {
+            const out = {};
+            document.querySelectorAll('a[href*="/groups/"]').forEach(a => {
+                let href = a.href.split('?')[0].replace(/\\/+$/, '');
+                if (!/\\/groups\\/[a-zA-Z0-9._-]+$/.test(href)) return;
+                // Anchor se upar chadho jab tak 'member' likha text na mile
+                let cur = a, depth = 0, txt = '';
+                while (cur && depth < 8) {
+                    const t = (cur.innerText || '');
+                    if (t.toLowerCase().includes('member') && t.length < 500) { txt = t; break; }
+                    cur = cur.parentElement; depth++;
+                }
+                if (!(href in out) || txt.length > (out[href] || '').length) out[href] = txt;
+            });
+            return out;
+        }
+    """)
+
+    urls = []
+    pre_skipped = 0
+    for clean, card_txt in cards.items():
+        if clean in already_joined:
+            continue
+        slug = clean.split("/groups/")[-1]
+        name = slug.strip("/").replace("-", " ").title()
+        # Blocked keyword slug mein? Visit kiye baghair hi chhor do
+        slug_l = slug.replace("-", "").replace("_", "").replace(".", "").lower()
+        _blk = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
+        if any(kw and kw.replace(" ", "") in slug_l for kw in _blk):
+            continue
+        # Card pe member count likha hai? Chhota group wahin skip karo
+        m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members', card_txt or "", re.I)
+        card_members = _parse_count(m.group(1)) if m else 0
+        if 0 < card_members < config["min_members"]:
+            card_privacy = "Private" if "Private" in (card_txt or "") else "Public" if "Public" in (card_txt or "") else "?"
+            log_csv(city, name, clean, "low_members", card_members, card_privacy)
+            skipped += 1
+            pre_skipped += 1
+            send_ui("skipped")
+            _pa = config.get("_activity")
+            if _pa:
+                try:
+                    _pa.record_skip()
+                except Exception:
+                    pass
+            continue
+        urls.append(clean)
+
+    if pre_skipped:
+        send_ui("log", text=f"   ⚡ {pre_skipped} small groups skipped from search results (not opened)")
+    send_ui("log", text=f"   📋 {len(urls)} groups found")
+
+    for group_url in list(urls):
+        if stop_event.is_set() or joined_today + joined >= limit:
+            break
+
+        name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
+        status = await join_one_group(page, group_url, name, city, config)
+
+        _act = config.get("_activity")
+        if status == "joined":
+            joined += 1
+            already_joined.add(group_url)
+            send_ui("joined", count=joined_today + joined)
+            if _act:
+                try:
+                    _act.record_join()
+                except Exception:
+                    pass
+
+        elif status == "skipped":
+            skipped += 1
+            send_ui("skipped")
+            if _act:
+                try:
+                    _act.record_skip()
+                except Exception:
+                    pass
+
+        # Delay strategy: Facebook sirf JOIN action ko sensitive samajhta
+        # hai — group ka page dekhna aam browsing hai. Isliye join ke baad
+        # poora delay, skip ke baad chhota sa. Speed 3-4x barh jati hai.
+        if status == "joined":
+            wait = rand_delay(config["delay_min"], config["delay_max"])
+        else:
+            wait = rand_delay(1.5, 3.5)
+        send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
+        await sleep(wait)
+
+    return joined, skipped
+
+# ── Playwright Main ───────────────────────────────────────────
+
+async def playwright_main(config):
+    already_joined = load_joined()
+    total         = load_total()
+    total_skipped = load_total_skipped()
+    joined_today  = 0
+    skipped_today = 0
+
+    async with async_playwright() as p:
+        send_ui("log", text="🌐 Launching browser...")
+        ctx = await p.chromium.launch_persistent_context(
+            user_data_dir=PW_PROFILE_DIR,
+            headless=False,
+            args=["--start-maximized", "--disable-notifications"],
+            viewport={"width": 1366, "height": 768},
+        )
+
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        send_ui("log", text="📘 Opening Facebook...")
+        await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=20000)
+        await sleep(2)
+        await dismiss_popups(page)
+
+        await sleep(3)
+
+        # Logged in check — home feed ya nav bar dikh raha hai?
+        # Facebook logged-in hone par [role="navigation"] dikhta hai
+        nav_visible  = await page.locator('[role="navigation"]').count() > 0
+        feed_visible = await page.locator('[role="feed"]').count() > 0
+        is_logged_in = nav_visible or feed_visible
+
+        send_ui("log", text=f"Login status: nav={nav_visible} feed={feed_visible}")
+
+        if not is_logged_in:
+            send_ui("log", text="⚠️  Please log in — enter Facebook ID and password in the browser!")
+            send_ui("log", text="⏳ Script will continue automatically after login (3 min)...")
+            try:
+                await page.wait_for_selector('[role="navigation"]', timeout=180000)
+            except:
+                send_ui("log", text="❌ Timeout — press START again")
+                await ctx.close()
+                send_ui("stopped")
+                return
+            await sleep(3)
+            send_ui("log", text="✅ Logged in! Session saved — next time it's automatic.")
+        else:
+            send_ui("log", text="✅ Already logged in to Facebook!")
+
+        # Switch to page
+        page_name = config.get("page_name") or DEFAULT_PAGE_NAME
+        page_link = (config.get("page_link") or DEFAULT_PAGE_LINK).strip()
+        if not page_name and not page_link:
+            send_ui("log", text="❌ Page Link is empty — never joining from personal profile. Stopping.")
+            await ctx.close()
+            send_ui("stopped")
+            return
+
+        send_ui("log", text=f"🔄 Switching to page '{page_name or page_link}'...")
+        switched = False
+        if page_link:
+            switched = await switch_via_link(page, page_link, page_name)
+        if not switched and page_name:
+            if page_link:
+                send_ui("log", text="   Link switch failed — trying by name...")
+            switched = await switch_to_page(page, page_name)
+        if switched:
+            send_ui("log", text=f"✅ Switched to page '{page_name or page_link}'!")
+        else:
+            send_ui("log", text="❌ Could not switch to the page — never joining from personal profile. Stopping.")
+            send_ui("log", text="   Check: (1) Page Link is correct (2) This account is an admin of the page")
+            config["_end_reason"] = "setup_failed"
+            await ctx.close()
+            send_ui("stopped")
+            return
+
+        # ── License watchdog — har 2 min: heartbeat + expiry check ──
+        act = config.get("_activity")
+
+        async def _license_watchdog():
+            while not stop_event.is_set():
+                await sleep(LICENSE_RECHECK_SEC)
+                if stop_event.is_set():
+                    return
+                if act:
+                    try:
+                        act.heartbeat()
+                    except Exception:
+                        pass
+                chk = lic.validate_key(config.get("license_key", ""))
+                if not chk["ok"]:
+                    send_ui("log", text=f"⛔ License: {chk['error']}")
+                    send_ui("log", text="   Bot is stopping — activate a new key and press START again.")
+                    config["_end_reason"] = "license_expired"
+                    stop_event.set()
+                    return
+
+        wd_task = asyncio.create_task(_license_watchdog())
+
+        selection = config["city"]
+        limit     = config["daily_limit"]
+
+        # "ALL AREAS" select ho toh saari 65 areas loop karo, warna sirf ek
+        if selection == ALL_AREAS_LABEL:
+            areas_to_run = AREAS.copy()
+            random.shuffle(areas_to_run)
+        else:
+            areas_to_run = [selection]
+
+        total_areas = len(areas_to_run)
+        send_ui("log", text=f"📍 {total_areas} area(s) to process")
+
+        for area_idx, area in enumerate(areas_to_run, 1):
+            if stop_event.is_set() or joined_today >= limit:
+                break
+
+            send_ui("log", text=f"\n🏙️  Area {area_idx}/{total_areas}: {area}")
+            send_ui("area", text=f"Area {area_idx}/{total_areas}: {area}")
+
+            # Cache se cities + counties nikalo (fast). Custom typed city ho
+            # toh cache mein nahi hogi — live calculate hoga (thoda slow).
+            loop = asyncio.get_event_loop()
+            _same_state = config.get("same_state_only", True)
+            targets = await loop.run_in_executor(
+                None, get_targets_for_area, area, _same_state)
+            random.shuffle(targets)
+            _st = _area_state_code(area)
+            send_ui("log", text=f"   🗺️  {len(targets)} targets"
+                    + (f" — {_st} only (50-mi radius)" if _same_state and _st
+                       else " (cities + counties)"))
+
+            area_joined_start = joined_today
+            for target in targets:
+                if stop_event.is_set() or joined_today >= limit:
+                    break
+                config["_current_city"] = target
+                n_joined, n_skipped = await search_and_join(page, target, already_joined, config, joined_today)
+                joined_today  += n_joined
+                skipped_today += n_skipped
+                total         += n_joined
+                total_skipped += n_skipped
+                save_total(total)
+                save_total_skipped(total_skipped)
+                send_ui("total", count=total)
+                send_ui("total_skipped", count=total_skipped)
+
+            area_joined = joined_today - area_joined_start
+            send_ui("log", text=f"   ✅ Area '{area}' complete: joined {area_joined} groups")
+
+        try:
+            wd_task.cancel()
+            try:
+                await wd_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        except Exception:
+            pass
+        if config.get("_end_reason") != "license_expired":
+            config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
+
+        send_ui("log", text=f"\n🎉 Done! This session: joined {joined_today} groups, skipped {skipped_today}.")
+        send_ui("log", text="✅ Session complete!")
+        await ctx.close()
+        send_ui("stopped")
+
+def run_playwright(config):
+    # ── License gate — the bot does not run without a valid key ──
+    info = lic.validate_key(config.get("license_key", ""))
+    if not info["ok"]:
+        send_ui("log", text=f"⛔ License invalid: {info['error']}")
+        send_ui("log", text="   Activate a valid key, then press START.")
+        send_ui("stopped")
+        return
+
+    # ── Gemini AI answers (optional, key rotation) ──
+    global GEMINI_KEYS, _gk_idx
+    GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
+    _gk_idx = 0
+    _gk_cooldown.clear()
+    send_ui("log", text=(f"🤖 AI answers ON ({GEMINI_MODEL}) — {len(GEMINI_KEYS)} key(s) in rotation")
+            if GEMINI_KEYS else "💬 AI answers OFF — using built-in template answers")
+
+    # ── Public/Private target + filters (session-wide counters) ──
+    config["_jp"] = 0
+    config["_jpriv"] = 0
+    _pp = config.get("public_pct", 30)
+    send_ui("log", text=f"🎯 Target mix: {_pp}% public / {100 - _pp}% private"
+            + ("  ·  skip no-post groups" if config.get("skip_no_post", True) else ""))
+    if config.get("custom_blocked"):
+        send_ui("log", text="   ⛔ Extra blocked keywords: "
+                + ", ".join(config["custom_blocked"][:12]))
+
+    # ── Usage log shuru (+ live report agar REPORT_URL set hai) ──
+    act = ActivityLog(config.get("employee", "unknown"), config.get("key_id", ""),
+                      config.get("license_exp", ""), INSTANCE)
+    try:
+        act.set_machine(lic.machine_id())
+    except Exception:
+        pass
+    try:
+        act.set_page_link(config.get("page_link", ""))
+    except Exception:
+        pass
+    _rurl = (getattr(lic, "REPORT_URL", "") or "").strip()
+    if _rurl:
+        _kind = ("Discord" if "discord.com/api/webhooks" in _rurl
+                 else "Telegram" if "api.telegram.org/bot" in _rurl else "webhook")
+        send_ui("log", text=f"📡 Live tracking ON — reporting to {_kind}")
+    else:
+        send_ui("log", text="📡 Live tracking OFF (no REPORT_URL in license_common.py)")
+    act.start_session()
+    config["_activity"] = act
+    config["_end_reason"] = "completed"
+
+    try:
+        asyncio.run(playwright_main(config))
+        act.end_session(config.get("_end_reason", "completed"))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+                ef.write(f"\n--- {datetime.now()} | FATAL (run_playwright) ---\n{tb}\n")
+        except:
+            pass
+        try:
+            act.end_session("error")
+        except Exception:
+            pass
+        send_ui("log", text=f"❌ Fatal error: {e}")
+        send_ui("log", text=f"   (Full details saved to error_log{SUFFIX}.txt)")
+        send_ui("stopped")
+
+# ── Tkinter UI ────────────────────────────────────────────────
+
+BG        = "#0f1117"   # window background (dark)
+CARD_BG   = "#181b23"   # cards
+BORDER    = "#262b38"   # borders
+INPUT_BG  = "#20242f"   # entry fields
+LOG_BG    = "#0b0d12"   # console
+TXT       = "#e8eaf0"   # primary text
+TXT_MUTED = "#8b90a0"   # secondary text
+FB_BLUE   = "#3b82f6"   # accent
+FB_BLUE_D = "#2563eb"
+GREEN     = "#22c55e"
+GREEN_BG  = "#14231a"
+ORANGE    = "#f59e0b"
+ORANGE_BG = "#26200f"
+RED       = "#ef4444"
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(f"FB Group Joiner — Account {INSTANCE}")
+        # 2-column layout. Left settings scroll karte hain aur START button
+        # left column ke neeche PINNED hai — isliye chhoti screen par bhi
+        # START hamesha nazar aata hai.
+        h = min(660, max(480, root.winfo_screenheight() - 90))
+        self.root.geometry(f"860x{h}")
+        self.root.minsize(720, 440)
+        self.root.configure(bg=BG)
+
+        self.joined_today   = 0
+        self.skipped_today  = 0
+        self.running        = False
+        self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
+
+        self._style()
+        self._build()
+        self._refresh_gemini_status()
+        self._refresh_mix_lbl()
+        self._refresh_license_ui()             # fast, local-only check
+        self._license_gate()                   # <-- ask for a key BEFORE anything else
+        if self._alive():
+            self._poll()
+            # Networked re-check (revocation URL) shortly after the window opens,
+            # then every 2 min while idle — so a remote "Suspend" takes hold
+            # without freezing the UI on startup.
+            self.root.after(1500, self._bg_license_recheck)
+
+    # ── License UI ───────────────────────────────────────────
+    def _alive(self):
+        try:
+            return bool(self.root.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _key_from_file(self, path):
+        """Read a key string from a .fbjkey (JSON {"key": ...}) or plain-text file."""
+        raw = open(path, encoding="utf-8").read().strip()
+        try:
+            d = json.loads(raw)
+            return (d.get("key") or "").strip() if isinstance(d, dict) else ""
+        except Exception:
+            return raw  # plain key string
+
+    # ── Targeting UI ────────────────────────────────────────
+    def _public_pct(self):
+        try:
+            return max(0, min(100, int(self.public_pct_var.get())))
+        except Exception:
+            return 30
+
+    def _refresh_mix_lbl(self):
+        p = self._public_pct()
+        self.mix_lbl.config(text=f"→ {p}% public / {100 - p}% private")
+
+    def _block_keywords(self):
+        try:
+            txt = self.block_box.get("1.0", "end")
+        except Exception:
+            txt = ""
+        out, seen = [], set()
+        for ln in txt.splitlines():
+            k = ln.strip().lower()
+            if k and k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
+    # ── Gemini API keys UI (rotation) ───────────────────────
+    def _gemini_box_text(self):
+        try:
+            return self.gemini_box.get("1.0", "end")
+        except Exception:
+            return ""
+
+    def _refresh_gemini_status(self):
+        keys = resolve_gemini_keys(self._gemini_box_text())
+        if keys:
+            self.gemini_status.config(
+                text=f"AI answers: ON  ·  {len(keys)} key(s) in rotation  ({GEMINI_MODEL})",
+                fg=GREEN)
+        else:
+            self.gemini_status.config(
+                text="AI answers: OFF — using built-in template answers", fg=TXT_MUTED)
+
+    def _persist_gemini(self):
+        s = load_settings()
+        s["gemini_keys"] = resolve_gemini_keys(self._gemini_box_text())
+        save_settings(s)
+
+    def _test_gemini(self):
+        keys = resolve_gemini_keys(self._gemini_box_text())
+        if not keys:
+            self.gemini_status.config(text="No keys to test.", fg=ORANGE)
+            return
+        self.gemini_status.config(text=f"Testing {len(keys)} key(s)…", fg=TXT_MUTED)
+        self._persist_gemini()
+
+        def work():
+            global GEMINI_KEYS, _gk_idx
+            old = GEMINI_KEYS
+            ok = 0
+            sample = ""
+            for k in keys:
+                GEMINI_KEYS = [k]
+                _gk_idx = 0
+                _gk_cooldown.clear()
+                try:
+                    ans = _gemini_sync("Do you live in the area?", "Dallas TX")
+                except Exception:
+                    ans = None
+                if ans:
+                    ok += 1
+                    sample = sample or ans
+            GEMINI_KEYS = old
+            msg = (f"{ok}/{len(keys)} keys OK — e.g. \"{sample[:40]}\"" if ok
+                   else "All keys failed — check keys / internet")
+            col = GREEN if ok else RED
+            self.root.after(0, lambda: self.gemini_status.config(text=msg, fg=col))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _bg_license_recheck(self):
+        """Off-thread validate WITH the revocation URL; re-arm every 2 min."""
+        if not self._alive():
+            return
+        if self.running:
+            self.root.after(120000, self._bg_license_recheck)
+            return
+
+        def work():
+            try:
+                info = lic.validate_key(lic.load_active_key(), check_url=True)
+            except Exception:
+                info = None
+            if self._alive():
+                self.root.after(0, lambda: self._after_bg_recheck(info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_bg_recheck(self, info):
+        if info is not None and not self.running:
+            self._refresh_license_ui(info)
+        if self._alive():
+            self.root.after(120000, self._bg_license_recheck)
+
+    def _refresh_license_ui(self, info=None):
+        if info is None:
+            info = lic.validate_key(lic.load_active_key(), check_url=False)
+        self.lic_info = info
+        if info["ok"]:
+            self.lic_var.set(
+                f"Licensed to:  {info['employee']}      "
+                f"Expires:  {info['exp']}   ({info.get('time_left','')} left)")
+            self.lic_lbl.config(fg=GREEN)
+            self.lic_row.pack_forget()
+            if not self.running:
+                self.btn.config(state="normal")
+        else:
+            self.lic_var.set(f"Not activated  —  {info.get('error') or 'no license key'}")
+            self.lic_lbl.config(fg=ORANGE)
+            self.lic_row.pack(fill="x", padx=16, pady=(0, 8))
+            self.btn.config(state="disabled")
+
+    def _try_activate(self, key, parent=None):
+        """Validate + save a key. Returns (ok, message)."""
+        key = (key or "").strip()
+        if not key:
+            return False, "Paste a license key first."
+        info = lic.validate_key(key)
+        if not info["ok"]:
+            return False, info["error"] or "Invalid key."
+        lic.save_active_key(key)
+        self._refresh_license_ui()
+        return True, (f"Activated for {info['employee']} — "
+                      f"expires {info['exp']} ({info.get('time_left','')} left).")
+
+    def _activate_key(self):
+        ok, msg = self._try_activate(self.key_entry_var.get())
+        if ok:
+            self.key_entry_var.set("")
+            messagebox.showinfo("Activated", msg)
+        else:
+            messagebox.showerror("Key rejected", msg)
+
+    def _load_transfer(self):
+        path = filedialog.askopenfilename(
+            title="Select the transfer_<name>.fbjkey file",
+            filetypes=[("FB Joiner key", "*.fbjkey"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            key = self._key_from_file(path)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        if not key:
+            messagebox.showerror("Error", "No key found in that file.")
+            return
+        self.key_entry_var.set(key)
+        self._activate_key()
+
+    def _show_machine_id(self):
+        mid = lic.machine_id()
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(mid)
+        except Exception:
+            pass
+        messagebox.showinfo(
+            "Machine ID",
+            f"This PC's Machine ID:\n\n{mid}\n\n"
+            "Copied to clipboard. Send it to your administrator if you need a "
+            "PC-locked key.")
+
+    # ── Startup license gate — modal, blocks the app until activated ──
+    def _license_gate(self):
+        if self.lic_info.get("ok"):
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Activation Required")
+        dlg.configure(bg=BG)
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        W, H = 540, 310
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - W) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - H) // 3
+        dlg.geometry(f"{W}x{H}+{max(x, 0)}+{max(y, 0)}")
+
+        tk.Label(dlg, text="License key required", bg=BG, fg=TXT,
+                 font=("Segoe UI", 15, "bold")).pack(anchor="w", padx=26, pady=(24, 4))
+        tk.Label(dlg, text="This copy is not activated. Enter the license key provided\n"
+                           "by your administrator to continue.",
+                 bg=BG, fg=TXT_MUTED, font=("Segoe UI", 9),
+                 justify="left").pack(anchor="w", padx=26)
+
+        gv = tk.StringVar()
+        ent = tk.Entry(dlg, textvariable=gv, font=("Consolas", 9), bg=INPUT_BG, fg=TXT,
+                       insertbackground=TXT, relief="flat", highlightthickness=1,
+                       highlightbackground=BORDER, highlightcolor=FB_BLUE)
+        ent.pack(fill="x", padx=26, pady=(18, 6), ipady=5)
+        ent.focus_set()
+
+        gmsg = tk.Label(dlg, text="", bg=BG, fg=ORANGE, font=("Segoe UI", 9),
+                        anchor="w", justify="left", wraplength=W - 52)
+        gmsg.pack(fill="x", padx=26)
+
+        def g_activate(_evt=None):
+            ok, msg = self._try_activate(gv.get(), parent=dlg)
+            if ok:
+                dlg.grab_release()
+                dlg.destroy()
+            else:
+                gmsg.config(text=msg, fg=ORANGE)
+
+        def g_load():
+            path = filedialog.askopenfilename(
+                parent=dlg, title="Select the transfer_<name>.fbjkey file",
+                filetypes=[("FB Joiner key", "*.fbjkey"), ("All files", "*.*")])
+            if not path:
+                return
+            try:
+                gv.set(self._key_from_file(path))
+            except Exception as e:
+                gmsg.config(text=str(e), fg=ORANGE)
+                return
+            g_activate()
+
+        def g_mid():
+            mid = lic.machine_id()
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(mid)
+            except Exception:
+                pass
+            gmsg.config(text=f"Machine ID copied: {mid}", fg=FB_BLUE)
+
+        br = tk.Frame(dlg, bg=BG)
+        br.pack(fill="x", padx=26, pady=(18, 0))
+        tk.Button(br, text="Activate", bg=GREEN, fg="white", relief="flat",
+                  font=("Segoe UI", 10, "bold"), cursor="hand2", padx=20, pady=6,
+                  command=g_activate).pack(side="left")
+        tk.Button(br, text="Load .fbjkey", bg=INPUT_BG, fg=TXT, relief="flat",
+                  font=("Segoe UI", 10), cursor="hand2", padx=14, pady=6,
+                  command=g_load).pack(side="left", padx=(8, 0))
+        tk.Button(br, text="Machine ID", bg=INPUT_BG, fg=TXT, relief="flat",
+                  font=("Segoe UI", 10), cursor="hand2", padx=14, pady=6,
+                  command=g_mid).pack(side="left", padx=(8, 0))
+        tk.Button(br, text="Quit", bg=INPUT_BG, fg=TXT_MUTED, relief="flat",
+                  font=("Segoe UI", 10), cursor="hand2", padx=14, pady=6,
+                  command=lambda: self.root.destroy()).pack(side="right")
+
+        ent.bind("<Return>", g_activate)
+        dlg.protocol("WM_DELETE_WINDOW",
+                     lambda: self.root.destroy() if not self.lic_info.get("ok")
+                     else dlg.destroy())
+        self.root.wait_window(dlg)
+
+    def _style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Dark.TCombobox",
+                        fieldbackground=INPUT_BG, background=INPUT_BG,
+                        foreground=TXT, arrowcolor=TXT_MUTED,
+                        bordercolor=BORDER, lightcolor=INPUT_BG, darkcolor=INPUT_BG,
+                        selectbackground=INPUT_BG, selectforeground=TXT)
+        style.map("Dark.TCombobox",
+                  fieldbackground=[("readonly", INPUT_BG)],
+                  foreground=[("readonly", TXT)])
+        style.configure("FB.Horizontal.TProgressbar",
+                        troughcolor=INPUT_BG, bordercolor=BORDER,
+                        background=GREEN, lightcolor=GREEN, darkcolor=GREEN,
+                        thickness=8)
+        self.root.option_add("*TCombobox*Listbox.background", INPUT_BG)
+        self.root.option_add("*TCombobox*Listbox.foreground", TXT)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", FB_BLUE)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
+
+    def _card(self, parent, **pack_opts):
+        """Dark card container"""
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(fill="x", **pack_opts)
+        card = tk.Frame(outer, bg=CARD_BG, padx=14, pady=12,
+                         highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill="x")
+        return card
+
+    def _section_title(self, parent, text):
+        tk.Label(parent, text=text, bg=CARD_BG, fg=TXT_MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 8))
+
+    def _entry(self, parent, var, **pack_opts):
+        e = tk.Entry(parent, textvariable=var, font=("Segoe UI", 11),
+                     bg=INPUT_BG, fg=TXT, insertbackground=TXT,
+                     relief="flat", highlightthickness=1,
+                     highlightbackground=BORDER, highlightcolor=FB_BLUE)
+        e.pack(fill="x", ipady=4, **pack_opts)
+        return e
+
+    def _build(self):
+        # ── Header ───────────────────────────────────────────
+        hdr = tk.Frame(self.root, bg=CARD_BG)
+        hdr.pack(fill="x")
+        row = tk.Frame(hdr, bg=CARD_BG)
+        row.pack(fill="x", padx=16, pady=(14, 2))
+        tk.Label(row, text="FB Group Joiner", bg=CARD_BG, fg=TXT,
+                 font=("Segoe UI", 16, "bold")).pack(side="left")
+        tk.Label(row, text=f"  ACCOUNT {INSTANCE}  ", bg=FB_BLUE, fg="white",
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(10, 0), pady=4)
+        self.status_var = tk.StringVar(value="●  Idle — press START to begin")
+        tk.Label(hdr, textvariable=self.status_var, bg=CARD_BG, fg=TXT_MUTED,
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=16, pady=(0, 4))
+
+        # ── License bar ──────────────────────────────────────
+        self.lic_var = tk.StringVar(value="")
+        self.lic_lbl = tk.Label(hdr, textvariable=self.lic_var, bg=CARD_BG,
+                                fg=TXT_MUTED, font=("Segoe UI", 9, "bold"),
+                                anchor="w")
+        self.lic_lbl.pack(fill="x", padx=16, pady=(0, 4))
+
+        self.lic_row = tk.Frame(hdr, bg=CARD_BG)
+        self.key_entry_var = tk.StringVar()
+        tk.Entry(self.lic_row, textvariable=self.key_entry_var, font=("Consolas", 9),
+                 bg=INPUT_BG, fg=TXT, insertbackground=TXT, relief="flat",
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=FB_BLUE).pack(side="left", fill="x", expand=True, ipady=3)
+        tk.Button(self.lic_row, text="Activate", bg=FB_BLUE, fg="white", relief="flat",
+                  font=("Segoe UI", 9, "bold"), cursor="hand2", padx=12,
+                  command=self._activate_key).pack(side="left", padx=(6, 0))
+        tk.Button(self.lic_row, text="Load .fbjkey", bg=INPUT_BG, fg=TXT, relief="flat",
+                  font=("Segoe UI", 9), cursor="hand2", padx=10,
+                  command=self._load_transfer).pack(side="left", padx=(6, 0))
+        tk.Button(self.lic_row, text="Machine ID", bg=INPUT_BG, fg=TXT, relief="flat",
+                  font=("Segoe UI", 9), cursor="hand2", padx=10,
+                  command=self._show_machine_id).pack(side="left", padx=(6, 0))
+        # pack/unpack _refresh_license_ui se hota hai
+
+        tk.Frame(hdr, bg=CARD_BG, height=8).pack(fill="x")
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x")
+
+        # ── Main area: 2 columns ─────────────────────────────
+        # Left = Settings + START  |  Right = Stats + Activity + Log
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(fill="both", expand=True, padx=12, pady=12)
+        main.columnconfigure(0, weight=0, minsize=310)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(0, weight=1)
+
+        left = tk.Frame(main, bg=BG)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        right = tk.Frame(main, bg=BG)
+        right.grid(row=0, column=1, sticky="nsew")
+
+        # ══ LEFT COLUMN — START (pinned) + scrollable Settings ═══
+        self.btn = tk.Button(left, text="▶   START",
+                             bg=GREEN, fg="white",
+                             font=("Segoe UI", 13, "bold"),
+                             relief="flat", cursor="hand2",
+                             activebackground="#16a34a", activeforeground="white",
+                             command=self._toggle, pady=12)
+        self.btn.pack(side="bottom", fill="x", pady=(8, 0))
+
+        _sc = tk.Frame(left, bg=BG)
+        _sc.pack(side="top", fill="both", expand=True)
+        _canvas = tk.Canvas(_sc, bg=BG, highlightthickness=0)
+        _vsb = tk.Scrollbar(_sc, orient="vertical", command=_canvas.yview)
+        _canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side="right", fill="y")
+        _canvas.pack(side="left", fill="both", expand=True)
+        card = tk.Frame(_canvas, bg=CARD_BG, padx=14, pady=12,
+                        highlightbackground=BORDER, highlightthickness=1)
+        _cw = _canvas.create_window((0, 0), window=card, anchor="nw")
+        card.bind("<Configure>",
+                  lambda e: _canvas.configure(scrollregion=_canvas.bbox("all")))
+        _canvas.bind("<Configure>",
+                     lambda e: _canvas.itemconfig(_cw, width=e.width))
+
+        def _wheel(e):
+            _canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        for _w in (_canvas, card):
+            _w.bind("<Enter>", lambda e: _canvas.bind_all("<MouseWheel>", _wheel))
+            _w.bind("<Leave>", lambda e: _canvas.unbind_all("<MouseWheel>"))
+
+        self._section_title(card, "SETTINGS")
+
+        self._label(card, "Area")
+        self.city_var = tk.StringVar(value=ALL_AREAS_LABEL)
+        area_values = [ALL_AREAS_LABEL] + AREAS
+        area_combo = ttk.Combobox(card, textvariable=self.city_var,
+                                   values=area_values, font=("Segoe UI", 10),
+                                   state="normal", style="Dark.TCombobox")
+        area_combo.pack(fill="x", pady=(2, 10), ipady=3)
+
+        self._label(card, "Page Link (your Facebook page URL)")
+        self.page_link_var = tk.StringVar(value=DEFAULT_PAGE_LINK)
+        self._entry(card, self.page_link_var, pady=(2, 10))
+
+        row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
+        col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        col2 = tk.Frame(row1, bg=CARD_BG); col2.pack(side="left", expand=True, fill="x")
+
+        self._label(col1, "Min Members")
+        self.min_members_var = tk.IntVar(value=1000)
+        self._entry(col1, self.min_members_var, pady=(2, 10))
+
+        self._label(col2, "Daily Limit")
+        self.daily_limit_var = tk.IntVar(value=250)
+        self._entry(col2, self.daily_limit_var, pady=(2, 10))
+
+        row2 = tk.Frame(card, bg=CARD_BG); row2.pack(fill="x")
+        col3 = tk.Frame(row2, bg=CARD_BG); col3.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        col4 = tk.Frame(row2, bg=CARD_BG); col4.pack(side="left", expand=True, fill="x")
+
+        self._label(col3, "Delay Min (sec)")
+        self.delay_min_var = tk.IntVar(value=5)
+        self._entry(col3, self.delay_min_var, pady=(2, 4))
+
+        self._label(col4, "Delay Max (sec)")
+        self.delay_max_var = tk.IntVar(value=12)
+        self._entry(col4, self.delay_max_var, pady=(2, 4))
+
+        _s0 = load_settings()
+
+        # ── Public / Private target mix ──
+        row3 = tk.Frame(card, bg=CARD_BG); row3.pack(fill="x", pady=(8, 0))
+        self._label(row3, "Public %  (rest = Private)")
+        pcell = tk.Frame(row3, bg=CARD_BG); pcell.pack(fill="x")
+        self.public_pct_var = tk.IntVar(value=int(_s0.get("public_pct", 30)))
+        e = tk.Entry(pcell, textvariable=self.public_pct_var, font=("Segoe UI", 11),
+                     bg=INPUT_BG, fg=TXT, insertbackground=TXT, relief="flat", width=6,
+                     highlightthickness=1, highlightbackground=BORDER, highlightcolor=FB_BLUE)
+        e.pack(side="left", ipady=3)
+        self.mix_lbl = tk.Label(pcell, text="", bg=CARD_BG, fg=TXT_MUTED,
+                                font=("Segoe UI", 8))
+        self.mix_lbl.pack(side="left", padx=(8, 0))
+        e.bind("<KeyRelease>", lambda ev: self._refresh_mix_lbl())
+
+        self.skip_nopost_var = tk.BooleanVar(value=bool(_s0.get("skip_no_post", True)))
+        tk.Checkbutton(card, text="Skip groups where members can't post (admin-only)",
+                       variable=self.skip_nopost_var, bg=CARD_BG, fg=TXT_MUTED,
+                       selectcolor=INPUT_BG, activebackground=CARD_BG,
+                       activeforeground=TXT, font=("Segoe UI", 8),
+                       highlightthickness=0, bd=0).pack(anchor="w", pady=(6, 2))
+
+        self.same_state_var = tk.BooleanVar(value=bool(_s0.get("same_state_only", True)))
+        tk.Checkbutton(card, text="Stay inside the target state only (50-mi radius, then next area)",
+                       variable=self.same_state_var, bg=CARD_BG, fg=TXT_MUTED,
+                       selectcolor=INPUT_BG, activebackground=CARD_BG,
+                       activeforeground=TXT, font=("Segoe UI", 8),
+                       highlightthickness=0, bd=0).pack(anchor="w", pady=(0, 2))
+
+        self._label(card, "Don't-join keywords  —  one per line (added to buy/sell filter)")
+        bkrow = tk.Frame(card, bg=CARD_BG)
+        bkrow.pack(fill="x", pady=(2, 4))
+        self.block_box = tk.Text(bkrow, height=3, font=("Consolas", 8), bg=INPUT_BG,
+                                 fg=TXT, insertbackground=TXT, relief="flat", wrap="word",
+                                 highlightthickness=1, highlightbackground=BORDER,
+                                 highlightcolor=FB_BLUE)
+        self.block_box.pack(side="left", fill="both", expand=True)
+        bkscroll = tk.Scrollbar(bkrow, command=self.block_box.yview)
+        bkscroll.pack(side="left", fill="y")
+        self.block_box.config(yscrollcommand=bkscroll.set)
+        try:
+            self.block_box.insert("1.0", "\n".join(resolve_block_keywords()))
+        except Exception:
+            pass
+        tk.Button(card, text="Reset to default list", bg=INPUT_BG, fg=TXT_MUTED,
+                  relief="flat", font=("Segoe UI", 7), cursor="hand2", padx=6,
+                  command=lambda: (self.block_box.delete("1.0", "end"),
+                                   self.block_box.insert("1.0",
+                                       "\n".join(DEFAULT_DONT_JOIN)))
+                  ).pack(anchor="w", pady=(0, 2))
+
+        tk.Label(card, text="Always on:  USA only  ·  no buy/sell  ·  engagement check",
+                 bg=CARD_BG, fg=TXT_MUTED, font=("Segoe UI", 8),
+                 justify="left").pack(anchor="w", pady=(6, 4))
+
+        # ── Gemini API keys — AI answers (auto-loaded from gemini_keys.txt) ──
+        self._label(card, "Gemini API Keys  —  one per line  ·  auto-loads gemini_keys.txt")
+        grow = tk.Frame(card, bg=CARD_BG)
+        grow.pack(fill="x", pady=(2, 2))
+        self.gemini_box = tk.Text(grow, height=3, font=("Consolas", 8), bg=INPUT_BG,
+                                  fg=TXT, insertbackground=TXT, relief="flat", wrap="none",
+                                  highlightthickness=1, highlightbackground=BORDER,
+                                  highlightcolor=FB_BLUE)
+        self.gemini_box.pack(side="left", fill="x", expand=True)
+        try:
+            # settings > env > gemini_keys.txt in the bot folder — all auto
+            _prev = resolve_gemini_keys("")
+            if _prev:
+                self.gemini_box.insert("1.0", "\n".join(_prev))
+        except Exception:
+            pass
+        tk.Button(grow, text="Test", bg=INPUT_BG, fg=TXT, relief="flat",
+                  font=("Segoe UI", 8), cursor="hand2", padx=8,
+                  command=self._test_gemini).pack(side="left", padx=(4, 0))
+        self.gemini_status = tk.Label(card, text="", bg=CARD_BG, fg=TXT_MUTED,
+                                      font=("Segoe UI", 8), anchor="w")
+        self.gemini_status.pack(anchor="w")
+        self.gemini_box.bind("<KeyRelease>", lambda e: self._refresh_gemini_status())
+
+        # (START button is pinned at the bottom of the left column — created above)
+
+        # ══ RIGHT COLUMN — Stats / Progress / Activity / Log ═
+        stats = tk.Frame(right, bg=BG)
+        stats.pack(fill="x")
+        stat_items = [
+            (0, GREEN,  GREEN_BG,  "JOINED THIS SESSION",  "joined_lbl"),
+            (1, ORANGE, ORANGE_BG, "SKIPPED THIS SESSION", "skipped_lbl"),
+        ]
+        for col, color, bg_color, label, attr in stat_items:
+            f = tk.Frame(stats, bg=bg_color, padx=12, pady=8,
+                         highlightbackground=BORDER, highlightthickness=1)
+            f.grid(row=0, column=col, sticky="nsew", padx=(0, 6) if col == 0 else 0)
+            stats.columnconfigure(col, weight=1)
+            v = self._tvar(attr)
+            v.set("0")
+            tk.Label(f, textvariable=v, font=("Segoe UI", 22, "bold"),
+                     fg=color, bg=bg_color).pack()
+            tk.Label(f, text=label, font=("Segoe UI", 8, "bold"),
+                     fg=TXT_MUTED, bg=bg_color).pack()
+
+        pb_frame = tk.Frame(right, bg=BG)
+        pb_frame.pack(fill="x", pady=(10, 0))
+        self.progress = ttk.Progressbar(pb_frame, maximum=250, mode="determinate",
+                                         style="FB.Horizontal.TProgressbar")
+        self.progress.pack(fill="x")
+        self.progress_lbl_var = tk.StringVar(value="0 / 250 joined this session")
+        tk.Label(pb_frame, textvariable=self.progress_lbl_var,
+                 bg=BG, font=("Segoe UI", 9), fg=TXT_MUTED).pack(pady=(3, 0))
+
+        now_card = tk.Frame(right, bg=CARD_BG, padx=14, pady=10,
+                            highlightbackground=BORDER, highlightthickness=1)
+        now_card.pack(fill="x", pady=(10, 0))
+        self._section_title(now_card, "CURRENT ACTIVITY")
+        self.now_area_var = tk.StringVar(value="Area: —")
+        self.now_target_var = tk.StringVar(value="Search: —")
+        tk.Label(now_card, textvariable=self.now_area_var, bg=CARD_BG,
+                 fg=TXT, font=("Segoe UI", 10, "bold"), anchor="w",
+                 wraplength=400, justify="left").pack(fill="x")
+        tk.Label(now_card, textvariable=self.now_target_var, bg=CARD_BG,
+                 fg=TXT_MUTED, font=("Segoe UI", 9), anchor="w",
+                 wraplength=400, justify="left").pack(fill="x", pady=(2, 0))
+
+        log_frame = tk.Frame(right, bg=BG)
+        log_frame.pack(fill="both", expand=True, pady=(10, 0))
+        log_hdr = tk.Frame(log_frame, bg=BG)
+        log_hdr.pack(fill="x")
+        tk.Label(log_hdr, text="ACTIVITY LOG", bg=BG, fg=TXT_MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Button(log_hdr, text="Clear", font=("Segoe UI", 8),
+                  relief="flat", bg=INPUT_BG, fg=TXT_MUTED,
+                  activebackground=BORDER, activeforeground=TXT,
+                  cursor="hand2", command=self._clear_log,
+                  padx=10).pack(side="right")
+        self.log_box = scrolledtext.ScrolledText(
+            log_frame, height=6, font=("Consolas", 9),
+            bg=LOG_BG, fg="#c9ceda", state="disabled",
+            relief="flat", bd=0, insertbackground=TXT,
+            highlightthickness=1, highlightbackground=BORDER)
+        self.log_box.pack(fill="both", expand=True, pady=(4, 0))
+
+    def _label(self, parent, text):
+        tk.Label(parent, text=text, bg=CARD_BG,
+                 font=("Segoe UI", 9, "bold"),
+                 fg=TXT_MUTED).pack(anchor="w")
+
+    def _tvar(self, name):
+        v = tk.StringVar()
+        setattr(self, f"{name}_var", v)
+        return v
+
+    def _toggle(self):
+        if self.running:
+            stop_event.set()
+            self.btn.config(text="▶   START", bg=GREEN)
+            self.status_var.set("●  Stopping...")
+            self.running = False
+        else:
+            # ── License check — no START without a valid key ──
+            info = lic.validate_key(lic.load_active_key())
+            if not info["ok"]:
+                self._refresh_license_ui()
+                self.status_var.set(f"●  {info.get('error') or 'License required'}")
+                messagebox.showerror(
+                    "License required",
+                    info.get("error") or "Activate a valid license key first.")
+                self._license_gate()
+                return
+            self.lic_info = info
+
+            city = self.city_var.get().strip()
+            if not city:
+                self.city_var.set("⚠ Enter an area!")
+                return
+            stop_event.clear()
+            self.joined_today  = 0
+            self.skipped_today = 0
+            self._update_stats()
+            self.progress["maximum"] = self.daily_limit_var.get()
+            self.progress["value"]   = 0
+            self.progress_lbl_var.set(f"0 / {self.daily_limit_var.get()} joined this session")
+            self.now_area_var.set("Area: starting...")
+            self.now_target_var.set("Search: —")
+            self.running = True
+            self.btn.config(text="⏹   STOP", bg=RED)
+            self.status_var.set("●  Running...")
+            config = {
+                "city":        city,
+                "page_name":   DEFAULT_PAGE_NAME,
+                "page_link":   self.page_link_var.get().strip(),
+                "min_members": self.min_members_var.get(),
+                "daily_limit": self.daily_limit_var.get(),
+                "delay_min":   self.delay_min_var.get(),
+                "delay_max":   self.delay_max_var.get(),
+                "employee":    self.lic_info.get("employee", "") or "unknown",
+                "license_key": lic.load_active_key(),
+                "license_exp": self.lic_info.get("exp", ""),
+                "key_id":      self.lic_info.get("kid", ""),
+                "gemini_keys": resolve_gemini_keys(self._gemini_box_text()),
+                "public_pct":  self._public_pct(),
+                "skip_no_post": bool(self.skip_nopost_var.get()),
+                "same_state_only": bool(self.same_state_var.get()),
+                "custom_blocked": self._block_keywords(),
+            }
+            self._persist_gemini()          # remember keys for next time
+            s = load_settings()
+            s["public_pct"] = self._public_pct()
+            s["skip_no_post"] = bool(self.skip_nopost_var.get())
+            s["same_state_only"] = bool(self.same_state_var.get())
+            s["block_keywords"] = self._block_keywords()
+            save_settings(s)
+            self._refresh_gemini_status()
+            threading.Thread(target=run_playwright, args=(config,), daemon=True).start()
+
+    def _log(self, text):
+        self.log_box.config(state="normal")
+        self.log_box.insert("end", text + "\n")
+        self.log_box.see("end")
+        self.log_box.config(state="disabled")
+
+    def _clear_log(self):
+        self.log_box.config(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.config(state="disabled")
+
+    def _update_stats(self):
+        self.joined_lbl_var.set(str(self.joined_today))
+        self.skipped_lbl_var.set(str(self.skipped_today))
+
+    def _poll(self):
+        try:
+            while True:
+                msg = ui_queue.get_nowait()
+                t = msg["type"]
+                if t == "log":
+                    self._log(msg["text"])
+                elif t == "area":
+                    self.now_area_var.set(f"📍 {msg['text']}")
+                elif t == "target":
+                    self.now_target_var.set(f"🔍 Searching: {msg['text']}")
+                elif t == "joined":
+                    self.joined_today = msg["count"]
+                    self._update_stats()
+                    self.progress["value"] = self.joined_today
+                    self.progress_lbl_var.set(f"{self.joined_today} / {self.daily_limit_var.get()} joined this session")
+                elif t == "skipped":
+                    self.skipped_today += 1
+                    self._update_stats()
+                elif t in ("total", "total_skipped"):
+                    pass  # All-time counters UI se hata diye — files mein ab bhi save hote hain
+                elif t == "stopped":
+                    self.running = False
+                    self.btn.config(text="▶   START", bg=GREEN)
+                    self.status_var.set("●  Idle — press START to begin")
+                    self.now_target_var.set("Search: —")
+                    self._log(f"📊 This session: {self.joined_today} joined | {self.skipped_today} skipped")
+                    self._refresh_license_ui()  # expire hui to START dobara lock
+        except queue.Empty:
+            pass
+        self.root.after(400, self._poll)
+
+
+def _self_update():
+    """Startup par check karo — naye files mile to lene ke baad bot ko
+    naye code ke saath restart karo. Frozen .exe par skip (chalti exe
+    replace nahi hoti)."""
+    if getattr(sys, "frozen", False) or "--no-update" in sys.argv:
+        return
+    try:
+        import updater
+        if updater.check_and_apply(getattr(lic, "UPDATE_URL", ""), APP_DIR):
+            os.execl(sys.executable, sys.executable, *sys.argv)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    _self_update()
+    root = tk.Tk()
+    app  = App(root)
+    # `py fb_joiner.py 3 --autostart` = UI khulte hi khud START ho jaye
+    if "--autostart" in sys.argv:
+        root.after(1500, app._toggle)
+    root.mainloop()

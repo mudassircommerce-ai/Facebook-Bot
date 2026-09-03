@@ -1,0 +1,15 @@
+{
+ "version": 1,
+ "files": {
+  "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
+  "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
+  "activity.py": "5a9ecc8a1adb1487ee3bded8b80d62f846afa2e166d9582416e93e51d119625a",
+  "areas.py": "ed2a1eaa516dd3741ae41b0f6017710a4e2ce2c038e1287c4b66c757e44f03b0",
+  "areas_cache.json": "5045780201dd96ac556055645c111ed416f331397ae80f711b29a75210c0a03a",
+  "fb_joiner.py": "2c6a0421b83b41b2fd2d5f5108e3f4c3be4da6260aac495476cbe8ddc47be05a",
+  "license_common.py": "60a72d153ab696c04a81e4e09da2187c586048ccf71dcbeb507a1728da5fc251",
+  "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
+  "updater.py": "cdb635c240fdfa9be39f211990bd30df2399e8fa2254e9297e85b344d201d522"
+ },
+ "sig": "FTAz1Q80VcCOy1BDWQA9Enpdewgw7Xg1-m_Xz5yshsnNxFbPBZtUHgzCttt09YSusbxoJKkQpEJDt3E-y9iJUG2IBTi3trdQUUGKVH6QzekjypTnUGIXkk5EhVt4FgMiw1Kp5rM0QUN2RzQ47GHfmnvAhcc9-JwOuNMdXv8EjVN8YJlVw1smgDgNdjNS9UPbjvZ9V_QoTOr_dFpP1jrnGrZfyHp0Myge6sZjEg1oAMQriv3O76ortzM3MzSQB-TTntJJdRR_JfFCR70yEKCsSstoPlcH6_E9KM3p75LElzRiHY3gTnQicynH2BPCQWORLtw0zx--v7fXFdq37ppvqg"
+}

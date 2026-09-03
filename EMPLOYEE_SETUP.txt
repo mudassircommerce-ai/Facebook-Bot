@@ -1,0 +1,97 @@
+==========================================================
+ FB GROUP JOINER — SETUP ON THE EMPLOYEE PC
+==========================================================
+
+You received from the administrator:
+   - a folder  FBGroupJoiner   (contains FBGroupJoiner.exe)
+       OR the .py bot files
+   - a license key   (a long text string, or a file named
+     transfer_<yourname>.fbjkey)
+
+There are NO API keys to enter. The only key is the
+license key above. Facebook is a normal browser login.
+
+
+----------------------------------------------------------
+ A.  IF YOU GOT THE  FBGroupJoiner  FOLDER (.exe)
+----------------------------------------------------------
+1. Unzip the folder to a normal location you can write to,
+   e.g.  C:\FBGroupJoiner
+   (Do NOT put it in "Program Files" — the bot saves its
+    login and logs next to the .exe.)
+
+2. Chromium browser (one time). Ask the admin which they
+   sent:
+   (a) an  ms-playwright  folder  -> copy it to
+       C:\Users\<you>\AppData\Local\ms-playwright
+   OR
+   (b) nothing -> install Python (see section B step 1),
+       then run in Command Prompt:
+          pip install playwright
+          playwright install chromium
+
+3. Double-click  FBGroupJoiner.exe
+
+4. An "Activation Required" window opens FIRST:
+      - paste the license key and click Activate
+        OR click "Load .fbjkey" and pick the
+        transfer_<yourname>.fbjkey file
+      - (If the admin made a PC-locked key: click
+        "Machine ID", send that value to the admin, and use
+        the key they send back.)
+
+5. A Facebook browser window opens. Log in to the Facebook
+   account for this bot — ONE time. The login is saved in a
+   "pw_profile" folder next to the .exe.
+
+6. In the control window:
+      - paste your Facebook PAGE link
+      - pick the target area
+      - set Daily Limit / delays if needed
+      - click START
+
+7. Running more than one account on the same PC:
+      FBGroupJoiner.exe 2
+      FBGroupJoiner.exe 3     ... etc.
+   Each number is a separate login + separate logs.
+
+
+----------------------------------------------------------
+ B.  IF YOU GOT THE  .py  FILES
+----------------------------------------------------------
+1. Install Python 3.10+ from https://www.python.org/downloads/
+   On the first installer screen TICK
+   "Add python.exe to PATH", then install.
+
+2. Open Command Prompt and run (one time):
+      pip install playwright pgeocode numpy geopy
+      playwright install chromium
+
+3. Put all the files in one folder, e.g. C:\fb_joiner
+   (fb_joiner.py, license_common.py, activity.py, areas.py,
+    areas_cache.json, and the start_accountN.bat files)
+
+4. Double-click  start_account1.bat   (or run:  py fb_joiner.py)
+
+5. Then do steps 4-6 from section A (activation window,
+   Facebook login, paste Page link, START).
+   For more accounts:  start_account2.bat, start_account3.bat …
+
+
+----------------------------------------------------------
+ WHAT IF THE KEY EXPIRES OR IS SUSPENDED
+----------------------------------------------------------
+The bot stops and shows the activation window again.
+Ask the admin for a new key, paste it, click Activate.
+Your Facebook login and your logs are NOT lost.
+
+
+----------------------------------------------------------
+ DO NOT
+----------------------------------------------------------
+- Do not share your  pw_profile  folder — it contains your
+  live Facebook session.
+- Do not change the delay settings to make it faster —
+  Facebook may restrict the account.
+- Do not edit config.py / accounts.py — they are not used;
+  login is done in the browser window.
