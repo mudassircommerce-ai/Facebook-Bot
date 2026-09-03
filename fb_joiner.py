@@ -627,75 +627,87 @@ async def _is_checkbox_checked(chk):
     except:
         return False
 
-async def _click_checkbox(chk) -> bool:
-    """FB ke custom checkbox kabhi seedhe click se tick nahi hote — kai
-    tareeqe try karo aur verify karo ke sach mein tick hua."""
-    for attempt in range(3):
-        try:
-            await chk.click(timeout=2500)
-        except Exception:
+async def _cb_checked(page, i) -> bool:
+    return await _is_checkbox_checked(page.locator(f'[data-fbjoin-idx="{i}"]').first)
+
+async def _click_cb(page, i) -> bool:
+    """Tagged clickable (label/wrapper) pe click, phir tagged box ka state
+    verify. Kai tareeqe — FB ke custom/hidden checkbox ke liye."""
+    clk = page.locator(f'[data-fbjoin-click="{i}"]').first
+    box = page.locator(f'[data-fbjoin-idx="{i}"]').first
+    for _ in range(3):
+        for target in (clk, box):
             try:
-                await chk.evaluate("el => el.click()")
+                await target.click(timeout=2000, force=True)
             except Exception:
-                pass
-        await sleep(rand_delay(0.3, 0.6))
-        if await _is_checkbox_checked(chk):
-            return True
-        # label / parent click
-        for xp in ["xpath=ancestor::label[1]", "xpath=.."]:
-            try:
-                await chk.locator(xp).first.click(timeout=1200)
-                await sleep(0.3)
-                if await _is_checkbox_checked(chk):
-                    return True
-            except Exception:
-                pass
-    return await _is_checkbox_checked(chk)
+                try:
+                    await target.evaluate("el => el.click()")
+                except Exception:
+                    pass
+            await sleep(rand_delay(0.3, 0.6))
+            if await _is_checkbox_checked(box):
+                return True
+    return await _is_checkbox_checked(box)
 
 async def tick_checkboxes(page):
     """
-    Facebook har sawaal ke checkboxes (single agree-checkbox ya
-    multiple-choice options) DOM mein ek jaisi hi tarah render karta hai —
-    isliye hum unhe unke sibling-group ke hisaab se pehchante hain:
-    - Group mein sirf 1 checkbox = standalone (jaise "I agree to rules") -> tick karo
-    - Group mein 1+ checkboxes = multiple-choice question -> sirf EK
-      best-matching option select karo, baaki chhoro (warna contradictory
-      answers jaate hain aur bot jaisa dikhta hai)
+    Join-dialog ke checkbox/radio options handle karo. FB inputs ko CSS se
+    chhupata hai — is liye hum HIDDEN inputs bhi pakadte hain aur unke
+    dikhne wale <label>/wrapper pe click karte hain.
     """
     ticked = 0
 
     groups = await page.evaluate("""
         () => {
-            // Sirf join-dialog ke andar dhundo — page ke baaqi checkboxes
-            // (notifications waghera) ko haath nahi lagana
-            const scope = document.querySelector('div[role="dialog"]') || document;
-            // checkbox + radio (FB "Yes / No" ke liye aksar radio use karta hai)
+            // Sabse upar wala VISIBLE dialog (aakhri in DOM) — warna document
+            const dlgs = [...document.querySelectorAll('div[role="dialog"]')]
+                          .filter(d => d.offsetParent !== null);
+            const scope = dlgs.length ? dlgs[dlgs.length - 1] : document;
             const isBox = 'input[type="checkbox"], input[type="radio"], '
                         + '[role="checkbox"], [role="radio"], [aria-checked]';
-            const raw = [...scope.querySelectorAll(isBox)]
-                .filter(el => el.offsetParent !== null
-                              || (el.getClientRects && el.getClientRects().length));
-            // Facebook kabhi ek hi option ko 2 tareeqon se render karta hai
-            // (chhupa <input> + upar custom [role] wrapper). Nested duplicates
-            // hata ke sirf outer (visible/clickable) element rakho.
-            const boxes = raw.filter(el => !raw.some(other => other !== el && other.contains(el)));
-            boxes.forEach((el, i) => el.setAttribute('data-fbjoin-idx', String(i)));
+            const vis = el => el.offsetParent !== null
+                              || (el.getClientRects && el.getClientRects().length > 0);
+            // real <input> hidden bhi ho to rakho; role/aria elements sirf visible
+            let raw = [...scope.querySelectorAll(isBox)].filter(el =>
+                el.tagName === 'INPUT' ? true : vis(el));
+            // nested duplicates hata do (chhupa input + upar custom wrapper)
+            const boxes = raw.filter(el => !raw.some(o => o !== el && o.contains(el)));
 
-            function countBoxesIn(el) {
-                return el.querySelectorAll(isBox).length;
+            function labelText(el) {
+                let lab = el.closest('label');
+                let t = (lab ? lab.innerText : '') || '';
+                if (!t.trim()) {
+                    let p = el.parentElement;
+                    for (let d = 0; p && d < 3; d++, p = p.parentElement) {
+                        if ((p.innerText || '').trim()) { t = p.innerText; break; }
+                    }
+                }
+                if (!t.trim()) t = el.getAttribute('aria-label') || '';
+                return t.trim().slice(0, 160);
+            }
+            function clickTarget(el) {
+                // hidden <input> -> uska label ya visible parent
+                if (el.tagName === 'INPUT' && !vis(el)) {
+                    let lab = el.closest('label');
+                    if (lab && vis(lab)) return lab;
+                    let p = el.parentElement;
+                    for (let d = 0; p && d < 4; d++, p = p.parentElement)
+                        if (vis(p)) return p;
+                }
+                return el;
             }
 
-            // Har checkbox ke liye sabse chhota ancestor dhundo jisme 2+
-            // checkboxes hon — yehi uska "question wrapper" hai. Agar 10
-            // level tak upar bhi koi ancestor 2+ checkboxes nahi rakhta,
-            // to yeh checkbox standalone hai (jaise "I agree to rules").
+            boxes.forEach((el, i) => {
+                el.setAttribute('data-fbjoin-idx', String(i));
+                clickTarget(el).setAttribute('data-fbjoin-click', String(i));
+            });
+
+            function countBoxesIn(el) { return el.querySelectorAll(isBox).length; }
             const wrapperOf = boxes.map(el => {
-                let cur = el.parentElement;
-                let depth = 0;
+                let cur = el.parentElement, depth = 0;
                 while (cur && depth < 10) {
                     if (countBoxesIn(cur) >= 2) return cur;
-                    cur = cur.parentElement;
-                    depth++;
+                    cur = cur.parentElement; depth++;
                 }
                 return null;
             });
@@ -705,14 +717,14 @@ async def tick_checkboxes(page):
             boxes.forEach((el, i) => {
                 const w = wrapperOf[i];
                 if (w === null) {
-                    groups.push({idx: [i], q: ""});
+                    groups.push({idx: [i], q: labelText(el), labels: [labelText(el)]});
                 } else {
                     if (!seen.has(w)) {
-                        const g = {idx: [], q: (w.innerText || "").trim().slice(0, 500)};
-                        seen.set(w, g);
-                        groups.push(g);
+                        const g = {idx: [], q: (w.innerText || '').trim().slice(0, 500), labels: []};
+                        seen.set(w, g); groups.push(g);
                     }
                     seen.get(w).idx.push(i);
+                    seen.get(w).labels.push(labelText(el));
                 }
             });
             return groups;
@@ -733,47 +745,32 @@ async def tick_checkboxes(page):
                                         "accept", "i will", "confirm", "i am",
                                         "full time", "i live")))
 
-    # ── groups parse karo ──
+    # ── groups parse karo (idx + label JS se aata hai) ──
     parsed = []
     for group in groups:
-        idx_list = group.get("idx", []) if isinstance(group, dict) else group
+        idxs = group.get("idx", []) if isinstance(group, dict) else group
+        labels = group.get("labels", []) if isinstance(group, dict) else []
         qtext = group.get("q", "") if isinstance(group, dict) else ""
         items = []
         already = False
-        for idx in idx_list:
-            chk = page.locator(f'[data-fbjoin-idx="{idx}"]').first
-            if await _is_checkbox_checked(chk):
+        for n, i in enumerate(idxs):
+            lbl = labels[n] if n < len(labels) else ""
+            if await _cb_checked(page, i):
                 already = True
-            text = ""
-            try:
-                text = (await chk.get_attribute("aria-label") or "").strip()
-            except Exception:
-                pass
-            if not text:
-                for xp in ["xpath=ancestor::label[1]",
-                           "xpath=following-sibling::*[1]",
-                           "xpath=..", "xpath=../.."]:
-                    try:
-                        t = (await chk.locator(xp).inner_text(timeout=400)).strip()
-                        if t and len(t) < 200:
-                            text = t
-                            break
-                    except:
-                        pass
-            items.append((chk, text))
+            items.append((i, lbl))
         if items:
             parsed.append({"items": items, "q": qtext, "already": already})
 
-    # ── FB kabhi Yes/No radios ko alag-alag "standalone" bana deta hai —
-    #    aise 2+ lone options (jinme se ek aff, ek neg) ko ek group maano ──
+    # ── FB kabhi Yes/No ko alag-alag "standalone" bana deta hai — ek aff
+    #    + ek neg lone option -> ek group ──
     lone_aff = [g for g in parsed if len(g["items"]) == 1
                 and _is_aff(g["items"][0][1]) and not _is_neg(g["items"][0][1])]
     lone_neg = [g for g in parsed if len(g["items"]) == 1
                 and _is_neg(g["items"][0][1])]
     if lone_aff and lone_neg:
-        merged_items = [g["items"][0] for g in lone_aff + lone_neg]
+        merged = [g["items"][0] for g in lone_aff + lone_neg]
         parsed = [g for g in parsed if g not in lone_aff and g not in lone_neg]
-        parsed.append({"items": merged_items, "q": "Yes / No", "already": False})
+        parsed.append({"items": merged, "q": "Yes / No", "already": False})
 
     for g in parsed:
         items, qtext, already = g["items"], g["q"], g["already"]
@@ -781,8 +778,7 @@ async def tick_checkboxes(page):
             continue
 
         if len(items) == 1:
-            chk, lbl = items[0]
-            # Akele checkbox (jaise "I agree to the rules") — AI se poochho
+            i, lbl = items[0]
             gi = await gemini_pick_index(
                 qtext or lbl or "Should you tick this box to join the group?",
                 ["Yes — tick it (I agree / I do / I promise)",
@@ -793,15 +789,16 @@ async def tick_checkboxes(page):
             if gi is None and _is_neg(lbl):
                 send_ui("log", text=f"   ⏭️ Negative option, skip: {lbl[:40]}")
                 continue
-            if await _click_checkbox(chk):
+            if await _click_cb(page, i):
                 ticked += 1
-                tag = "🤖 AI " if gi == 0 else ""
-                send_ui("log", text=f"   {tag}☑️ Ticked: {(lbl or 'agree')[:40]}")
+                send_ui("log", text=f"   {'🤖 AI ' if gi == 0 else ''}☑️ Ticked: "
+                                    f"{(lbl or 'agree')[:40]}")
+            else:
+                send_ui("log", text=f"   ⚠️ Could not tick: {(lbl or 'box')[:40]}")
             await sleep(rand_delay(0.4, 0.8))
             continue
 
-        # Multiple-choice / Yes-No — Gemini se poochho, warna affirmative
-        opts = [it[1] or f"option {n+1}" for n, it in enumerate(items)]
+        opts = [lbl or f"option {n+1}" for n, (i, lbl) in enumerate(items)]
         chosen = None
         gi = await gemini_pick_index(qtext or "Which option applies to you?", opts)
         if gi is not None and not _is_neg(opts[gi]):
@@ -812,20 +809,19 @@ async def tick_checkboxes(page):
                            if _is_aff(it[1]) and not _is_neg(it[1])), None)
         if chosen is None:
             chosen = next((it for it in items if not _is_neg(it[1])), items[0])
-        if await _click_checkbox(chosen[0]):
+        if await _click_cb(page, chosen[0]):
             ticked += 1
             send_ui("log", text=f"   ☑️ Ticked: {(chosen[1] or 'option')[:40]}")
         else:
             send_ui("log", text="   ⚠️ Checkbox click didn't register")
         await sleep(rand_delay(0.4, 0.8))
 
-    # ── Safety: dialog mein options the par kuch tick nahi hua? Koi bhi
-    #    affirmative-dikhne wala box tick kar do ──
+    # ── Safety: options the par kuch tick nahi hua -> koi affirmative box ──
     if parsed and ticked == 0:
         for g in parsed:
-            for chk, lbl in g["items"]:
-                if not _is_neg(lbl) and not await _is_checkbox_checked(chk):
-                    if await _click_checkbox(chk):
+            for i, lbl in g["items"]:
+                if not _is_neg(lbl) and not await _cb_checked(page, i):
+                    if await _click_cb(page, i):
                         ticked += 1
                         send_ui("log", text=f"   ☑️ (safety) Ticked: {(lbl or 'option')[:40]}")
                         break
@@ -1019,29 +1015,144 @@ async def handle_questions(page):
             except Exception:
                 pass
 
-    # Bache hue checkbox-groups (dair se render hue) — dobara try
-    try:
-        more = await tick_checkboxes(page)
-        if more:
-            ticked += more
-    except Exception:
-        pass
+    # ── HAR checkbox/radio ka jawab AI se — tick_checkboxes AI-driven hai
+    #    (standalone box: AI se "tick karun ya nahi"; multi-option: AI se
+    #    kaunsa). Loop karo taake dair se render hue boxes bhi pakre jayein
+    #    aur koi unticked non-negative box na bache. ──
+    async def _unchecked_left():
+        return await page.evaluate(r"""
+            () => {
+              const dlgs = [...document.querySelectorAll('div[role=dialog]')]
+                            .filter(d => d.offsetParent !== null);
+              const dlg = dlgs.length ? dlgs[dlgs.length - 1] : document;
+              const SEL = 'input[type=checkbox], input[type=radio], '
+                        + '[role=checkbox], [role=radio], [aria-checked]';
+              const isOn = el => el.getAttribute('aria-checked') === 'true'
+                                 || el.checked === true;
+              const labOf = el => {
+                let t = (el.closest('label') ? el.closest('label').innerText : '')
+                      || el.getAttribute('aria-label')
+                      || (el.parentElement ? el.parentElement.innerText : '') || '';
+                return t.trim().toLowerCase().slice(0, 90);
+              };
+              const isNeg = l => /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline|false)(\W|$)/.test(l);
+              let boxes = [...dlg.querySelectorAll(SEL)]
+                .filter(el => el.tagName === 'INPUT' || el.offsetParent !== null
+                              || (el.getClientRects && el.getClientRects().length));
+              boxes = boxes.filter(el => !boxes.some(o => o !== el && o.contains(el)));
+              const wrapOf = el => {
+                let cur = el.parentElement, d = 0;
+                while (cur && d < 10) {
+                  if (cur.querySelectorAll(SEL).length >= 2) return cur;
+                  cur = cur.parentElement; d++;
+                }
+                return null;
+              };
+              const groups = new Map(); const lone = [];
+              boxes.forEach(el => {
+                const w = wrapOf(el);
+                if (w) { if(!groups.has(w)) groups.set(w, []); groups.get(w).push(el); }
+                else lone.push(el);
+              });
+              let left = 0;
+              [...groups.values()].forEach(els => { if (!els.some(isOn)) left++; });
+              lone.forEach(el => { if (!isOn(el) && !isNeg(labOf(el))) left++; });
+              return left;
+            }
+        """)
+
+    for _round in range(4):
+        try:
+            n = await tick_checkboxes(page)      # AI-driven
+        except Exception:
+            n = 0
+        ticked += n
+        try:
+            left = await _unchecked_left()
+        except Exception:
+            left = 0
+        if not left:
+            break
+        await sleep(rand_delay(0.5, 0.9))
+
+    # ── Last-resort (rare): Submit ABHI bhi disabled -> keyword affirmative
+    #    sweep taake join na atke (AI se sab try ho chuka). ──
+    async def _submit_is_disabled():
+        for sel in ['[aria-label="Submit"]', '[aria-label="Send"]',
+                    '[aria-label="Send Request"]', 'button[type="submit"]',
+                    'div[role="button"]:has-text("Submit")',
+                    'div[role="button"]:has-text("Send Request")']:
+            try:
+                b = dlg.locator(sel).first
+                if await b.count() and await b.is_visible(timeout=500):
+                    ad = await b.get_attribute("aria-disabled")
+                    try:
+                        dis = await b.is_disabled()
+                    except Exception:
+                        dis = False
+                    return ad == "true" or dis
+            except Exception:
+                pass
+        return False
+
+    if await _submit_is_disabled():
+        did = await page.evaluate(r"""
+            () => {
+              const dlgs = [...document.querySelectorAll('div[role=dialog]')]
+                            .filter(d => d.offsetParent !== null);
+              const dlg = dlgs.length ? dlgs[dlgs.length - 1] : document;
+              const SEL = 'input[type=checkbox], input[type=radio], '
+                        + '[role=checkbox], [role=radio], [aria-checked]';
+              const isOn = el => el.getAttribute('aria-checked') === 'true' || el.checked === true;
+              const labOf = el => ((el.closest('label') ? el.closest('label').innerText : '')
+                        || el.getAttribute('aria-label')
+                        || (el.parentElement ? el.parentElement.innerText : '') || '')
+                        .trim().toLowerCase().slice(0, 90);
+              const isNeg = l => /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline)(\W|$)/.test(l);
+              let n = 0;
+              [...dlg.querySelectorAll(SEL)].forEach(el => {
+                if (isOn(el) || isNeg(labOf(el))) return;
+                const t = el.closest('label') || el;
+                try { t.click(); n++; } catch (e) {}
+              });
+              return n;
+            }
+        """)
+        if did:
+            ticked += did
+            send_ui("log", text=f"   ☑️ (last-resort) ticked {did} box(es) to enable Submit")
 
     # ── Submit — aur confirm karo ke dialog band hua ──
     async def _submit_once():
+        # 1) known selectors
         for sel in ['[aria-label="Submit"]', '[aria-label="Send"]',
-                    'button[type="submit"]', 'div[role="button"]:has-text("Submit")',
-                    'div[role="button"]:has-text("Send Request")']:
+                    '[aria-label="Send Request"]', 'button[type="submit"]',
+                    'div[role="button"]:has-text("Submit")',
+                    'div[role="button"]:has-text("Send Request")',
+                    'div[role="button"]:has-text("Done")']:
             try:
                 btn = dlg.locator(sel).first
-                if await btn.is_visible(timeout=1200):
-                    if await btn.is_disabled():
-                        continue
-                    await btn.click()
+                if await btn.count() and await btn.is_visible(timeout=800):
+                    await btn.click(force=True)
                     await sleep(1.8)
                     return True
             except:
                 pass
+        # 2) koi bhi dialog-button jis pe Submit/Send/Join/Done/Request likha ho
+        try:
+            btns = await dlg.locator('div[role="button"], button').all()
+            for b in btns:
+                try:
+                    txt = ((await b.inner_text(timeout=400)) or "").strip().lower()
+                except Exception:
+                    txt = ""
+                if txt in ("submit", "send", "send request", "done", "join",
+                           "request to join", "continue"):
+                    await b.click(force=True)
+                    await sleep(1.8)
+                    return True
+        except Exception:
+            pass
         return False
 
     ok = await _submit_once()
@@ -2206,7 +2317,7 @@ RED       = "#ef4444"
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"FB Group Joiner — Account {INSTANCE}")
+        self.root.title(f"FB Group Joiner — Account {INSTANCE}   ·   build v{_build_no()}")
         # 2-column layout. Left settings scroll karte hain aur START button
         # left column ke neeche PINNED hai — isliye chhoti screen par bhi
         # START hamesha nazar aata hai.
@@ -2934,11 +3045,19 @@ class App:
         self.root.after(400, self._poll)
 
 
+def _build_no() -> str:
+    try:
+        return open(os.path.join(APP_DIR, ".update_ver"), encoding="utf-8").read().strip()
+    except Exception:
+        return "?"
+
+
 def _self_update():
     """Startup par check karo — naye files mile to lene ke baad bot ko
     naye code ke saath restart karo. Frozen .exe par skip (chalti exe
     replace nahi hoti)."""
     if getattr(sys, "frozen", False) or "--no-update" in sys.argv:
+        print(f"[build] running build v{_build_no()} (auto-update off)")
         return
     try:
         import updater
@@ -2946,6 +3065,7 @@ def _self_update():
             os.execl(sys.executable, sys.executable, *sys.argv)
     except Exception:
         pass
+    print(f"[build] running build v{_build_no()}")
 
 
 if __name__ == "__main__":
