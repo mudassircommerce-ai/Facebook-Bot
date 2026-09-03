@@ -669,17 +669,18 @@ async def tick_checkboxes(page):
             // Sirf join-dialog ke andar dhundo — page ke baaqi checkboxes
             // (notifications waghera) ko haath nahi lagana
             const scope = document.querySelector('div[role="dialog"]') || document;
-            const raw = [...scope.querySelectorAll('input[type="checkbox"], [role="checkbox"]')]
-                .filter(el => el.offsetParent !== null);
-            // Facebook kabhi ek hi checkbox ko 2 tareeqon se render karta hai
-            // (chhupa hua <input type=checkbox> + upar custom [role=checkbox]
-            // wrapper). Dono ko count karne se ek hi option "2-item group"
-            // lagta hai — isliye nested duplicates hata ke sirf outer
-            // (visible/clickable) element rakho.
+            // checkbox + radio (FB "Yes / No" ke liye aksar radio use karta hai)
+            const isBox = 'input[type="checkbox"], input[type="radio"], '
+                        + '[role="checkbox"], [role="radio"], [aria-checked]';
+            const raw = [...scope.querySelectorAll(isBox)]
+                .filter(el => el.offsetParent !== null
+                              || (el.getClientRects && el.getClientRects().length));
+            // Facebook kabhi ek hi option ko 2 tareeqon se render karta hai
+            // (chhupa <input> + upar custom [role] wrapper). Nested duplicates
+            // hata ke sirf outer (visible/clickable) element rakho.
             const boxes = raw.filter(el => !raw.some(other => other !== el && other.contains(el)));
             boxes.forEach((el, i) => el.setAttribute('data-fbjoin-idx', String(i)));
 
-            const isBox = 'input[type="checkbox"], [role="checkbox"]';
             function countBoxesIn(el) {
                 return el.querySelectorAll(isBox).length;
             }
@@ -718,54 +719,118 @@ async def tick_checkboxes(page):
         }
     """)
 
+    _NEG = ("no", "nope", "disagree", "i don't", "i do not", "i won't",
+            "decline", "not agree", "false")
+
+    def _is_neg(t):
+        t = (t or "").strip().lower()
+        return t in ("no", "nope") or any(t.startswith(n) for n in _NEG)
+
+    def _is_aff(t):
+        t = (t or "").strip().lower()
+        return (t in ("yes", "yeah", "yep", "i agree", "agree", "i do", "true")
+                or any(w in t for w in ("yes", "agree", "i do", "promise",
+                                        "accept", "i will", "confirm", "i am",
+                                        "full time", "i live")))
+
+    # ── groups parse karo ──
+    parsed = []
     for group in groups:
         idx_list = group.get("idx", []) if isinstance(group, dict) else group
-        qtext    = group.get("q", "") if isinstance(group, dict) else ""
+        qtext = group.get("q", "") if isinstance(group, dict) else ""
         items = []
-        already_checked = False
+        already = False
         for idx in idx_list:
             chk = page.locator(f'[data-fbjoin-idx="{idx}"]').first
             if await _is_checkbox_checked(chk):
-                already_checked = True
+                already = True
             text = ""
-            for xp in ["xpath=ancestor::label[1]", "xpath=.."]:
-                try:
-                    text = (await chk.locator(xp).inner_text(timeout=400)).strip()
-                    if text:
-                        break
-                except:
-                    pass
+            try:
+                text = (await chk.get_attribute("aria-label") or "").strip()
+            except Exception:
+                pass
+            if not text:
+                for xp in ["xpath=ancestor::label[1]",
+                           "xpath=following-sibling::*[1]",
+                           "xpath=..", "xpath=../.."]:
+                    try:
+                        t = (await chk.locator(xp).inner_text(timeout=400)).strip()
+                        if t and len(t) < 200:
+                            text = t
+                            break
+                    except:
+                        pass
             items.append((chk, text))
+        if items:
+            parsed.append({"items": items, "q": qtext, "already": already})
 
-        if already_checked or not items:
+    # ── FB kabhi Yes/No radios ko alag-alag "standalone" bana deta hai —
+    #    aise 2+ lone options (jinme se ek aff, ek neg) ko ek group maano ──
+    lone_aff = [g for g in parsed if len(g["items"]) == 1
+                and _is_aff(g["items"][0][1]) and not _is_neg(g["items"][0][1])]
+    lone_neg = [g for g in parsed if len(g["items"]) == 1
+                and _is_neg(g["items"][0][1])]
+    if lone_aff and lone_neg:
+        merged_items = [g["items"][0] for g in lone_aff + lone_neg]
+        parsed = [g for g in parsed if g not in lone_aff and g not in lone_neg]
+        parsed.append({"items": merged_items, "q": "Yes / No", "already": False})
+
+    for g in parsed:
+        items, qtext, already = g["items"], g["q"], g["already"]
+        if already:
             continue
 
         if len(items) == 1:
-            # Standalone checkbox — jaise "I agree to the rules"
-            if await _click_checkbox(items[0][0]):
+            chk, lbl = items[0]
+            # Akele checkbox (jaise "I agree to the rules") — AI se poochho
+            gi = await gemini_pick_index(
+                qtext or lbl or "Should you tick this box to join the group?",
+                ["Yes — tick it (I agree / I do / I promise)",
+                 "No — leave it unticked"])
+            if gi == 1:
+                send_ui("log", text=f"   🤖 AI: leave unticked — {(qtext or lbl)[:45]}")
+                continue
+            if gi is None and _is_neg(lbl):
+                send_ui("log", text=f"   ⏭️ Negative option, skip: {lbl[:40]}")
+                continue
+            if await _click_checkbox(chk):
                 ticked += 1
-                send_ui("log", text="   ☑️ Ticked agree-checkbox")
+                tag = "🤖 AI " if gi == 0 else ""
+                send_ui("log", text=f"   {tag}☑️ Ticked: {(lbl or 'agree')[:40]}")
             await sleep(rand_delay(0.4, 0.8))
+            continue
+
+        # Multiple-choice / Yes-No — Gemini se poochho, warna affirmative
+        opts = [it[1] or f"option {n+1}" for n, it in enumerate(items)]
+        chosen = None
+        gi = await gemini_pick_index(qtext or "Which option applies to you?", opts)
+        if gi is not None and not _is_neg(opts[gi]):
+            chosen = items[gi]
+            send_ui("log", text=f"   🤖 AI picked: {opts[gi][:50]}")
+        if chosen is None:
+            chosen = next((it for it in items
+                           if _is_aff(it[1]) and not _is_neg(it[1])), None)
+        if chosen is None:
+            chosen = next((it for it in items if not _is_neg(it[1])), items[0])
+        if await _click_checkbox(chosen[0]):
+            ticked += 1
+            send_ui("log", text=f"   ☑️ Ticked: {(chosen[1] or 'option')[:40]}")
         else:
-            # Multiple-choice — pehle Gemini se poochho kaunsa option
-            opts = [it[1] for it in items]
-            chosen = None
-            gi = await gemini_pick_index(qtext or "Which option applies to you?", opts)
-            if gi is not None:
-                chosen = items[gi]
-                send_ui("log", text=f"   🤖 AI picked option: {opts[gi][:50]}")
-            if chosen is None:
-                low = [o.lower() for o in opts]
-                for kw in CHECKBOX_PREFERENCE_KEYWORDS:
-                    j = next((n for n, t in enumerate(low) if kw in t), None)
-                    if j is not None:
-                        chosen = items[j]
+            send_ui("log", text="   ⚠️ Checkbox click didn't register")
+        await sleep(rand_delay(0.4, 0.8))
+
+    # ── Safety: dialog mein options the par kuch tick nahi hua? Koi bhi
+    #    affirmative-dikhne wala box tick kar do ──
+    if parsed and ticked == 0:
+        for g in parsed:
+            for chk, lbl in g["items"]:
+                if not _is_neg(lbl) and not await _is_checkbox_checked(chk):
+                    if await _click_checkbox(chk):
+                        ticked += 1
+                        send_ui("log", text=f"   ☑️ (safety) Ticked: {(lbl or 'option')[:40]}")
                         break
-            if chosen is None:
-                chosen = items[0]
-            if await _click_checkbox(chosen[0]):
-                ticked += 1
-            await sleep(rand_delay(0.4, 0.8))
+            if ticked:
+                break
 
     return ticked
 
@@ -896,24 +961,22 @@ async def handle_questions(page):
                 await ss(page, "question_text_not_found")
             except:
                 pass
-        # Sawaal ka text — ctx na mile to bhi jo mila (dialog-text lines /
-        # poora dialog) usi se Gemini ko poochho, taake HAR sawaal ka
-        # jawab AI de. Sirf tab template jab ctx bhi khali ho AUR keys
-        # kaam na karein.
+        # HAR sawaal ka jawab AI se — q_for_ai hamesha kuch na kuch hota hai
         q_for_ai = (ctx
                     or (q_lines[q_idx - 1] if 0 <= q_idx - 1 < len(q_lines) else "")
-                    or (dlg_text or "").strip()[:400])
+                    or (dlg_text or "").strip()[:400]
+                    or "Answer this Facebook group's membership question briefly, "
+                       "in the first person, as a friendly local resident.")
         is_bot = any(k in (ctx or q_for_ai.lower()) for k in BOT_KEYWORDS)
-        answer = None
-        if GEMINI_KEYS and q_for_ai.strip():
-            answer = await gemini_answer(q_for_ai)
+        answer = await gemini_answer(q_for_ai) if GEMINI_KEYS else None
         if answer:
             send_ui("log", text=f"   🤖 AI answer ({GEMINI_MODEL})")
         elif is_bot:
             answer = pick(BOT_ANSWERS)
-            send_ui("log", text="🤖 Bot-check question — answering like a human")
+            send_ui("log", text="   🤖 Bot-check — human-style template (AI unavailable)")
         else:
             answer = pick_answer(ctx)
+            send_ui("log", text="   💬 template answer (AI unavailable)")
         # Log mein dikhao kaunsa sawaal mila (pehle 60 chars) — taake
         # ghalat jawab jaye toh pata chale kyun
         q_preview = ctx.split("\n")[0][:60] if ctx else "(question text not found)"
@@ -926,17 +989,94 @@ async def handle_questions(page):
     if answered:
         send_ui("log", text=f"📝 Answered {answered} question(s)")
 
-    # Submit — sirf dialog ke andar wala button
-    for sel in ['[aria-label="Submit"]','[aria-label="Send"]','button[type="submit"]']:
+    # ── Koi bhi text field khali NA chhoro (saare jawab lazmi hain) ──
+    for inp in inputs:
         try:
-            btn = dlg.locator(sel).first
-            if await btn.is_visible(timeout=1500):
-                await btn.click()
-                await sleep(1.5)
-                return True
-        except:
+            if not await inp.is_visible():
+                continue
+        except Exception:
+            continue
+        cur = ""
+        try:
+            cur = ((await inp.input_value()) or "").strip()
+        except Exception:
+            try:
+                cur = ((await inp.inner_text()) or "").strip()
+            except Exception:
+                cur = ""
+        if not cur:
+            fill = None
+            if GEMINI_KEYS:
+                fill = await gemini_answer(
+                    (dlg_text or "").strip()[:400]
+                    or "Answer this Facebook group's membership question as a "
+                       "friendly local resident, one short sentence.")
+            fill = fill or pick(JOIN_ANSWERS)
+            try:
+                await human_type(inp, fill)
+                answered += 1
+                send_ui("log", text="   ✍️ Filled a blank answer (mandatory)")
+            except Exception:
+                pass
+
+    # Bache hue checkbox-groups (dair se render hue) — dobara try
+    try:
+        more = await tick_checkboxes(page)
+        if more:
+            ticked += more
+    except Exception:
+        pass
+
+    # ── Submit — aur confirm karo ke dialog band hua ──
+    async def _submit_once():
+        for sel in ['[aria-label="Submit"]', '[aria-label="Send"]',
+                    'button[type="submit"]', 'div[role="button"]:has-text("Submit")',
+                    'div[role="button"]:has-text("Send Request")']:
+            try:
+                btn = dlg.locator(sel).first
+                if await btn.is_visible(timeout=1200):
+                    if await btn.is_disabled():
+                        continue
+                    await btn.click()
+                    await sleep(1.8)
+                    return True
+            except:
+                pass
+        return False
+
+    ok = await _submit_once()
+    # dialog abhi bhi khula? matlab kuch adhoora reh gaya — ek retry
+    try:
+        still_open = await dlg.is_visible(timeout=800)
+    except:
+        still_open = False
+    if still_open:
+        send_ui("log", text="   ↻ Form abhi tak khula — dobara bhar ke submit")
+        try:
+            await tick_checkboxes(page)
+        except Exception:
             pass
-    return ticked > 0 or answered > 0
+        for inp in inputs:
+            try:
+                if await inp.is_visible():
+                    v = (await inp.inner_text()).strip()
+                    if not v:
+                        await human_type(inp, pick(JOIN_ANSWERS))
+            except Exception:
+                pass
+        await _submit_once()
+        try:
+            still_open = await dlg.is_visible(timeout=800)
+        except:
+            still_open = False
+        if still_open:
+            send_ui("log", text="   ⚠️ Submit button disabled/form incomplete — screenshot saved")
+            try:
+                await ss(page, "form_incomplete")
+            except:
+                pass
+
+    return ticked > 0 or answered > 0 or ok
 
 async def get_group_info(page):
     html  = await page.content()
