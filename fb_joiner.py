@@ -2443,6 +2443,71 @@ async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
     return ctx
 
 
+def _load_cookie_file(path: str) -> list:
+    """
+    fb_cookies.json ko Playwright cookie-format mein convert karo. Format:
+    "Cookie-Editor" / "EditThisCookie" jaisi Chrome extensions ka JSON
+    export (list of {name, value, domain, path, expirationDate, ...}) —
+    employee apne trusted phone/PC (jahan FB pehle se logged-in/trusted
+    hai) se export karke ye file bot folder mein rakh sakta hai. Isse
+    bot fresh login KABHI nahi karta — seedha trusted session use karta
+    hai, jo VPS ki naye-device login jaisa risk trigger nahi karta.
+    """
+    try:
+        raw = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    ss_map = {"no_restriction": "None", "lax": "Lax", "strict": "Strict",
+              "unspecified": "Lax", "none": "None"}
+    out = []
+    for c in raw:
+        try:
+            name = c.get("name")
+            value = c.get("value")
+            domain = c.get("domain", "")
+            if not name or value is None or not domain:
+                continue
+            item = {
+                "name": name, "value": value,
+                "domain": domain, "path": c.get("path") or "/",
+                "httpOnly": bool(c.get("httpOnly", False)),
+                "secure": bool(c.get("secure", True)),
+            }
+            exp = c.get("expirationDate") or c.get("expires")
+            if exp:
+                try:
+                    item["expires"] = float(exp)
+                except Exception:
+                    pass
+            ss = str(c.get("sameSite", "")).strip().lower()
+            if ss:
+                item["sameSite"] = ss_map.get(ss, "Lax")
+            out.append(item)
+        except Exception:
+            continue
+    return out
+
+
+async def _import_cookies(ctx) -> int:
+    """fb_cookies{SUFFIX}.json (agar bot folder mein hai) load karo — har
+    profile/account ki apni alag file (fb_cookies.json = account 1,
+    fb_cookies_2.json = account 2, wagera — pw_profile ki tarah). Return:
+    kitni cookies import hui (0 = file nahi hai ya khaali)."""
+    path = os.path.join(APP_DIR, f"fb_cookies{SUFFIX}.json")
+    if not os.path.exists(path):
+        return 0
+    cookies = _load_cookie_file(path)
+    if not cookies:
+        return 0
+    try:
+        await ctx.add_cookies(cookies)
+        return len(cookies)
+    except Exception:
+        return 0
+
+
 # ── Playwright Main ───────────────────────────────────────────
 
 async def playwright_main(config):
@@ -2456,6 +2521,11 @@ async def playwright_main(config):
         send_ui("log", text="🌐 Launching browser...")
         ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
                                extra_args=["--start-maximized"])
+
+        n_ck = await _import_cookies(ctx)
+        if n_ck:
+            send_ui("log", text=f"🍪 Loaded {n_ck} saved cookies (trusted session, "
+                                f"no fresh login needed)")
 
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         send_ui("log", text="📘 Opening Facebook...")
@@ -2662,6 +2732,9 @@ async def _login_browser_main():
         send_ui("log", text="🌐 Browser khul raha hai — Facebook pe login karo…")
         ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
                                extra_args=["--start-maximized"])
+        n_ck = await _import_cookies(ctx)
+        if n_ck:
+            send_ui("log", text=f"🍪 Loaded {n_ck} saved cookies (trusted session)")
         closed = {"v": False}
         ctx.on("close", lambda *a: closed.__setitem__("v", True))
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()

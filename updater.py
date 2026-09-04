@@ -10,8 +10,8 @@
 # embedded public key se verify karta hai, warna update reject.
 #
 # Sirf CODE files touch hoti hain — pw_profile / license.key /
-# bot_settings.json / usage / gemini_keys.txt / transfer_*.fbjkey
-# ko kabhi haath nahi lagta.
+# bot_settings.json / usage / gemini_keys.txt / fb_cookies*.json /
+# transfer_*.fbjkey ko kabhi haath nahi lagta.
 #
 # Koi external library nahi.
 # ============================================================
