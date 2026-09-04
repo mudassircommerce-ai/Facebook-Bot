@@ -2825,6 +2825,57 @@ def run_logout_browser():
         send_ui("logout_done")
 
 
+async def _load_cookies_main(src_path: str):
+    """
+    User ne "Load cookies" se chuni hui JSON file ko:
+      1. fb_cookies{SUFFIX}.json (is profile ki apni file) mein save karo
+      2. TURANT ek headless browser (isi profile) mein inject bhi kar do —
+         taake abhi ke abhi pata chal jaye kitni cookies li (0 = file ka
+         format galat ya khaali — turant pata chal jaye, agli baar START
+         karte waqt chup-chaap fail na ho).
+    """
+    dst = os.path.join(APP_DIR, f"fb_cookies{SUFFIX}.json")
+    try:
+        raw = json.load(open(src_path, encoding="utf-8"))
+        if not isinstance(raw, list) or not raw:
+            send_ui("log", text="❌ Ye file cookies ki list nahi lag rahi — "
+                                "Cookie-Editor se 'Export as JSON' use karo.")
+            send_ui("cookies_done", count=-1)
+            return
+        with open(dst, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+    except Exception as e:
+        send_ui("log", text=f"❌ File padhne mein masla: {str(e)[:80]}")
+        send_ui("cookies_done", count=-1)
+        return
+
+    send_ui("log", text="🍪 Cookies save ho gayi — abhi test kar rahe hain…")
+    n = 0
+    try:
+        async with async_playwright() as p:
+            ctx = await _launch_ctx(p, headless=True)
+            n = await _import_cookies(ctx)
+            await ctx.close()
+    except Exception as e:
+        send_ui("log", text=f"cookie load error: {str(e)[:80]}")
+
+    if n:
+        send_ui("log", text=f"✅ {n} cookies load ho gayi is profile mein — "
+                            f"ab START pe fresh login nahi hoga.")
+    else:
+        send_ui("log", text="⚠️ File mein se koi valid cookie nahi mili — "
+                            "shayad format match nahi hua. Dobara export try karo.")
+    send_ui("cookies_done", count=n)
+
+
+def run_load_cookies(src_path: str):
+    try:
+        asyncio.run(_load_cookies_main(src_path))
+    except Exception as e:
+        send_ui("log", text=f"cookie load error: {str(e)[:80]}")
+        send_ui("cookies_done", count=-1)
+
+
 def run_playwright(config):
     # ── License gate — the bot does not run without a valid key ──
     info = lic.validate_key(config.get("license_key", ""))
@@ -2930,6 +2981,7 @@ class App:
         self.running        = False
         self._login_open    = False
         self._logout_open   = False
+        self._cookies_open  = False
         self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
 
         self._style()
@@ -3341,6 +3393,12 @@ class App:
                                    activebackground=BORDER, activeforeground=TXT,
                                    command=self._open_login, pady=6)
         self.login_btn.pack(side="left", fill="x", expand=True)
+        self.load_cookies_btn = tk.Button(acct_row, text="🍪  Load cookies",
+                                          bg=INPUT_BG, fg=TXT_MUTED, font=("Segoe UI", 9),
+                                          relief="flat", cursor="hand2",
+                                          activebackground=BORDER, activeforeground=TXT,
+                                          command=self._do_load_cookies, pady=6)
+        self.load_cookies_btn.pack(side="left", padx=(6, 0))
 
         _sc = tk.Frame(left, bg=BG)
         _sc.pack(side="top", fill="both", expand=True)
@@ -3559,8 +3617,27 @@ class App:
         setattr(self, f"{name}_var", v)
         return v
 
+    def _do_load_cookies(self):
+        if self.running or getattr(self, "_login_open", False) or \
+                getattr(self, "_logout_open", False) or \
+                getattr(self, "_cookies_open", False):
+            return
+        path = filedialog.askopenfilename(
+            title="Cookie-Editor se export ki hui JSON file chuno",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        self._cookies_open = True
+        self.load_cookies_btn.config(text="🍪  Loading…", state="disabled")
+        self.login_btn.config(state="disabled")
+        self.logout_btn.config(state="disabled")
+        self.btn.config(state="disabled")
+        self.status_var.set("●  Loading cookies…")
+        threading.Thread(target=run_load_cookies, args=(path,), daemon=True).start()
+
     def _open_login(self):
-        if self.running or getattr(self, "_logout_open", False):
+        if self.running or getattr(self, "_logout_open", False) or \
+                getattr(self, "_cookies_open", False):
             return
         if getattr(self, "_login_open", False):
             # dobara dabaya -> login browser band karo
@@ -3572,12 +3649,14 @@ class App:
         self.login_btn.config(text="🌐  Browser open — log in, then click here / close it")
         self.btn.config(state="disabled")
         self.logout_btn.config(state="disabled")
+        self.load_cookies_btn.config(state="disabled")
         self.status_var.set("●  Login browser open…")
         threading.Thread(target=run_login_browser, daemon=True).start()
 
     def _do_logout(self):
         if self.running or getattr(self, "_login_open", False) or \
-                getattr(self, "_logout_open", False):
+                getattr(self, "_logout_open", False) or \
+                getattr(self, "_cookies_open", False):
             return
         if not messagebox.askyesno(
                 "Log out of Facebook",
@@ -3589,6 +3668,7 @@ class App:
         self._logout_open = True
         self.logout_btn.config(text="🚪  Logging out…", state="disabled")
         self.login_btn.config(state="disabled")
+        self.load_cookies_btn.config(state="disabled")
         self.btn.config(state="disabled")
         self.status_var.set("●  Logging out of Facebook…")
         threading.Thread(target=run_logout_browser, daemon=True).start()
@@ -3607,6 +3687,10 @@ class App:
             if getattr(self, "_logout_open", False):
                 messagebox.showinfo("Logging out",
                                     "Logout khatam hone ka intezaar karo, phir START.")
+                return
+            if getattr(self, "_cookies_open", False):
+                messagebox.showinfo("Loading cookies",
+                                    "Cookies load hone ka intezaar karo, phir START.")
                 return
             # ── License check — no START without a valid key ──
             info = lic.validate_key(lic.load_active_key())
@@ -3637,6 +3721,7 @@ class App:
             self.btn.config(text="⏹   STOP", bg=RED)
             self.login_btn.config(state="disabled")
             self.logout_btn.config(state="disabled")
+            self.load_cookies_btn.config(state="disabled")
             self.status_var.set("●  Running...")
             config = {
                 "city":        city,
@@ -3709,13 +3794,26 @@ class App:
                     self.login_btn.config(
                         text="🔓  Open browser & log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
+                    self.load_cookies_btn.config(state="normal")
                     self.status_var.set("●  Login done — press START")
                     self._refresh_license_ui()
                 elif t == "logout_done":
                     self._logout_open = False
                     self.logout_btn.config(text="🚪  Log out", state="normal")
                     self.login_btn.config(state="normal")
+                    self.load_cookies_btn.config(state="normal")
                     self.status_var.set("●  Logged out — press 'Open browser & log in' to sign in again")
+                    self._refresh_license_ui()
+                elif t == "cookies_done":
+                    self._cookies_open = False
+                    self.load_cookies_btn.config(text="🍪  Load cookies", state="normal")
+                    self.login_btn.config(state="normal")
+                    self.logout_btn.config(state="normal")
+                    n = msg.get("count", 0)
+                    self.status_var.set(
+                        "●  Cookies loaded — press START" if n > 0 else
+                        "●  Cookie load failed — check the file" if n < 0 else
+                        "●  No cookies found in that file")
                     self._refresh_license_ui()
                 elif t == "stopped":
                     self.running = False
@@ -3724,6 +3822,7 @@ class App:
                     self.login_btn.config(
                         text="🔓  Open browser & log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
+                    self.load_cookies_btn.config(state="normal")
                     self.status_var.set("●  Idle — press START to begin")
                     self.now_target_var.set("Search: —")
                     self._log(f"📊 This session: {self.joined_today} joined | {self.skipped_today} skipped")
