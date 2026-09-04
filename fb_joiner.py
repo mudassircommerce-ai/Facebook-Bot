@@ -672,16 +672,21 @@ def _target_state(target: str) -> str:
     return p[-1] if p and len(p[-1]) == 2 and p[-1].isupper() else ""
 
 
-def get_targets_for_area(area: str, same_state_only: bool = True) -> list:
+def get_targets_for_area(area: str, same_state_only: bool = True,
+                          include_counties: bool = True) -> list:
     """
     Ek area (e.g. 'Waco Texas') ke liye search targets (cities + counties)
     return karo. Pehle cache check karo (fast), warna live calculate karo.
     same_state_only=True -> sirf usi state ki cities/counties (border par
     50-mile radius dusre state mein ghus jata tha — ab nahi).
+    include_counties=False -> sirf cities, county-level targets skip
+    (employee ki apni choice — UI checkbox se).
     """
     cached = _AREA_CACHE.get(area)
     if cached:
-        targets = list(cached.get("cities", [])) + list(cached.get("counties", []))
+        targets = list(cached.get("cities", []))
+        if include_counties:
+            targets += list(cached.get("counties", []))
     else:
         targets = get_nearby_cities(area, 50)
 
@@ -2385,6 +2390,59 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
 
     return joined, skipped
 
+# ── Stealth browser launch ──────────────────────────────────
+# Facebook plain Playwright/Chromium ko "automation" ke taur pe detect kar
+# leta hai (navigator.webdriver=true, missing plugins, "Chrome is being
+# controlled..." infobar wagera) — isi ki wajah se login ke baad kabhi
+# kabhi checkpoint/captcha aa ke wapas login page pe bhej deta hai. Ye
+# helper wahi kami door karta hai — har browser (login/join/logout) isi se
+# khulta hai taake sab jagah ek jaisi (aur behtar) fingerprint mile.
+_STEALTH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
+_STEALTH_INIT_JS = """
+() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5].map(() => ({ name: 'Chrome PDF Plugin' }))
+    });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    if (!window.chrome) { window.chrome = { runtime: {} }; }
+    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (origQuery) {
+        window.navigator.permissions.query = (params) => (
+            params && params.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : origQuery(params)
+        );
+    }
+}
+"""
+
+
+async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
+    """Persistent-context browser — automation-fingerprint kam karke."""
+    args = ["--disable-blink-features=AutomationControlled", "--disable-notifications"]
+    if extra_args:
+        args += extra_args
+    kwargs = dict(
+        user_data_dir=PW_PROFILE_DIR,
+        headless=headless,
+        args=args,
+        ignore_default_args=["--enable-automation"],
+        user_agent=_STEALTH_UA,
+        locale="en-US",
+    )
+    if viewport is not None:
+        kwargs["viewport"] = viewport
+    ctx = await p.chromium.launch_persistent_context(**kwargs)
+    try:
+        await ctx.add_init_script(_STEALTH_INIT_JS)
+    except Exception:
+        pass
+    return ctx
+
+
 # ── Playwright Main ───────────────────────────────────────────
 
 async def playwright_main(config):
@@ -2396,12 +2454,8 @@ async def playwright_main(config):
 
     async with async_playwright() as p:
         send_ui("log", text="🌐 Launching browser...")
-        ctx = await p.chromium.launch_persistent_context(
-            user_data_dir=PW_PROFILE_DIR,
-            headless=False,
-            args=["--start-maximized", "--disable-notifications"],
-            viewport={"width": 1366, "height": 768},
-        )
+        ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
+                               extra_args=["--start-maximized"])
 
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         send_ui("log", text="📘 Opening Facebook...")
@@ -2553,13 +2607,15 @@ async def playwright_main(config):
             # toh cache mein nahi hogi — live calculate hoga (thoda slow).
             loop = asyncio.get_event_loop()
             _same_state = config.get("same_state_only", True)
+            _inc_counties = config.get("include_counties", True)
             targets = await loop.run_in_executor(
-                None, get_targets_for_area, area, _same_state)
+                None, get_targets_for_area, area, _same_state, _inc_counties)
             random.shuffle(targets)
             _st = _area_state_code(area)
             send_ui("log", text=f"   🗺️  {len(targets)} targets"
                     + (f" — {_st} only (50-mi radius)" if _same_state and _st
-                       else " (cities + counties)"))
+                       else "")
+                    + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
 
             area_joined_start = joined_today
             for target in targets:
@@ -2604,11 +2660,8 @@ async def _login_browser_main():
     nahi. User window band karega -> session save -> ho gaya."""
     async with async_playwright() as p:
         send_ui("log", text="🌐 Browser khul raha hai — Facebook pe login karo…")
-        ctx = await p.chromium.launch_persistent_context(
-            user_data_dir=PW_PROFILE_DIR, headless=False,
-            args=["--start-maximized", "--disable-notifications"],
-            viewport={"width": 1366, "height": 768},
-        )
+        ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
+                               extra_args=["--start-maximized"])
         closed = {"v": False}
         ctx.on("close", lambda *a: closed.__setitem__("v", True))
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
@@ -2659,10 +2712,7 @@ async def _logout_main():
     send_ui("log", text="🚪 Facebook se logout ho raha hai…")
     try:
         async with async_playwright() as p:
-            ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=PW_PROFILE_DIR, headless=True,
-                args=["--disable-notifications"],
-            )
+            ctx = await _launch_ctx(p, headless=True)
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             try:
                 await page.goto("https://www.facebook.com/", timeout=30000,
@@ -3308,6 +3358,13 @@ class App:
                        activeforeground=TXT, font=("Segoe UI", 8),
                        highlightthickness=0, bd=0).pack(anchor="w", pady=(0, 2))
 
+        self.include_counties_var = tk.BooleanVar(value=bool(_s0.get("include_counties", True)))
+        tk.Checkbutton(card, text="Also join county-level groups (untick = cities only, no counties)",
+                       variable=self.include_counties_var, bg=CARD_BG, fg=TXT_MUTED,
+                       selectcolor=INPUT_BG, activebackground=CARD_BG,
+                       activeforeground=TXT, font=("Segoe UI", 8),
+                       highlightthickness=0, bd=0).pack(anchor="w", pady=(0, 2))
+
         self._label(card, "Don't-join keywords  —  one per line (added to buy/sell filter)")
         bkrow = tk.Frame(card, bg=CARD_BG)
         bkrow.pack(fill="x", pady=(2, 4))
@@ -3524,6 +3581,7 @@ class App:
                 "public_pct":  self._public_pct(),
                 "skip_no_post": bool(self.skip_nopost_var.get()),
                 "same_state_only": bool(self.same_state_var.get()),
+                "include_counties": bool(self.include_counties_var.get()),
                 "custom_blocked": self._block_keywords(),
             }
             self._persist_gemini()          # remember keys for next time
@@ -3531,6 +3589,7 @@ class App:
             s["public_pct"] = self._public_pct()
             s["skip_no_post"] = bool(self.skip_nopost_var.get())
             s["same_state_only"] = bool(self.same_state_var.get())
+            s["include_counties"] = bool(self.include_counties_var.get())
             s["block_keywords"] = self._block_keywords()
             save_settings(s)
             self._refresh_gemini_status()
