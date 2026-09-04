@@ -90,6 +90,7 @@ class ActivityLog:
         d.setdefault("last_heartbeat", _now())
         d.setdefault("license_exp", self.license_exp)
         d.setdefault("daily", {})       # {"2026-08-31": 42}
+        d.setdefault("daily_skips", {}) # {"2026-08-31": {"low_members": 12, ...}}
         d.setdefault("sessions", [])    # [{start, stop, joined, skipped, reason, instance}]
         d.setdefault("totals", {"joined": 0, "skipped": 0})
         return d
@@ -219,11 +220,15 @@ class ActivityLog:
             self._save()
         self._push("join")
 
-    def record_skip(self) -> None:
+    def record_skip(self, reason: str = "") -> None:
         with self._lock:
             self._data["totals"]["skipped"] = self._data["totals"].get("skipped", 0) + 1
             if self._session is not None:
                 self._session["skipped"] += 1
+            if reason:
+                today = date.today().isoformat()
+                ds = self._data.setdefault("daily_skips", {}).setdefault(today, {})
+                ds[reason] = ds.get(reason, 0) + 1
             self._data["last_heartbeat"] = _now()
             self._save()
         # skip pe har baar push nahi — sirf save; heartbeat/join se update ho jayega
@@ -234,6 +239,64 @@ class ActivityLog:
             self._save()
         self._push("heartbeat")
 
+    def alert(self, text: str) -> None:
+        """Foran (throttle bypass) Discord/Telegram pe ek alert bhejo —
+        checkpoint / pending-limit / crash jaise cases ke liye."""
+        self._last_chat = 0.0
+        self._push_text("🚨  " + text + "\n" + self._status_line())
+
+    def daily_summary_text(self) -> str:
+        today = date.today().isoformat()
+        j = self._data.get("daily", {}).get(today, 0)
+        sk = self._data.get("daily_skips", {}).get(today, {})
+        sk_total = sum(sk.values())
+        parts = ", ".join(f"{k} {v}" for k, v in
+                          sorted(sk.items(), key=lambda x: -x[1])) or "—"
+        return (f"📊  **{self.employee}** (profile {self.instance}) — {today}\n"
+                f"Joined today: {j}   ·   Skipped: {sk_total}\n"
+                f"Breakdown: {parts}\n"
+                f"All-time joined: {self._data.get('totals', {}).get('joined', 0)}   ·   "
+                f"license expires {self.license_exp or '—'}")
+
+    def send_daily_summary(self) -> None:
+        self._last_chat = 0.0
+        self._push_text(self.daily_summary_text())
+
+    def _push_text(self, text: str) -> None:
+        """Ek raw message Discord/Telegram pe (throttle nahi). JSON endpoint
+        par sirf normal _summary jata hai (text nahi)."""
+        url = _report_url()
+        if not url:
+            return
+        low = url.lower()
+        is_discord = "discord.com/api/webhooks" in low or "discordapp.com/api/webhooks" in low
+        is_tg = "api.telegram.org/bot" in low
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
+        if is_discord:
+            target = url
+            body = json.dumps({"content": text[:1900]}).encode("utf-8")
+        elif is_tg:
+            sep = "&" if "?" in url else "?"
+            target = f"{url}{sep}text={urllib.parse.quote(text)}&parse_mode=Markdown"
+            body = None
+        else:
+            return  # JSON endpoints ke liye alert-text nahi (unhe _summary milta hai)
+
+        def work():
+            try:
+                hdrs = {"User-Agent": ua}
+                if body is None:
+                    req = urllib.request.Request(target, headers=hdrs)
+                else:
+                    hdrs["Content-Type"] = "application/json"
+                    req = urllib.request.Request(target, data=body, headers=hdrs)
+                urllib.request.urlopen(req, timeout=8).read()
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
     def end_session(self, reason: str = "app_closed") -> None:
         with self._lock:
             if self._session is not None and self._session.get("stop") is None:
@@ -243,3 +306,8 @@ class ActivityLog:
             self._save()
             self._session = None
         self._push("stop")
+        # din ka summary (jab employee bot band kare)
+        try:
+            self.send_daily_summary()
+        except Exception:
+            pass

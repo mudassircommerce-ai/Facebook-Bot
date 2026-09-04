@@ -69,8 +69,13 @@ def check_and_apply(update_url: str, base_dir: str, log=print) -> bool:
         local_ver = open(verfile, encoding="utf-8").read().strip()
     except Exception:
         local_ver = ""
-    if ver and ver == local_ver:
-        return False   # is version par pehle se hain
+    # Sirf tab update jab GitHub ka version LOCAL se BARA ho (downgrade nahi)
+    try:
+        if int(ver) <= int(local_ver or 0):
+            return False
+    except Exception:
+        if ver and ver == local_ver:
+            return False
 
     files = man.get("files", {})   # {name: sha256}
 

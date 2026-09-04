@@ -570,7 +570,11 @@ def get_targets_for_area(area: str, same_state_only: bool = True) -> list:
                 targets = in_state
     return targets
 
+_LAST_CSV_STATUS = ""
+
 def log_csv(area, name, url, status, members="?", privacy="?"):
+    global _LAST_CSV_STATUS
+    _LAST_CSV_STATUS = status
     exists = Path(LOG_FILE).exists()
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -1061,7 +1065,7 @@ async def handle_questions(page):
             }
         """)
 
-    for _round in range(4):
+    for _round in range(6):
         try:
             n = await tick_checkboxes(page)      # AI-driven
         except Exception:
@@ -1073,6 +1077,44 @@ async def handle_questions(page):
             left = 0
         if not left:
             break
+        # AI/label click nahi laga -> is round mein raw click (label ya self)
+        if _round >= 1:
+            try:
+                forced = await page.evaluate(r"""
+                    () => {
+                      const dlgs = [...document.querySelectorAll('div[role=dialog]')]
+                                    .filter(d => d.offsetParent !== null);
+                      const dlg = dlgs.length ? dlgs[dlgs.length-1] : document;
+                      const SEL='input[type=checkbox],input[type=radio],[role=checkbox],[role=radio],[aria-checked]';
+                      const isOn=el=>el.getAttribute('aria-checked')==='true'||el.checked===true;
+                      const labOf=el=>((el.closest('label')?el.closest('label').innerText:'')
+                        ||el.getAttribute('aria-label')||(el.parentElement?el.parentElement.innerText:'')||'')
+                        .trim().toLowerCase().slice(0,90);
+                      const isNeg=l=>/(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline)(\W|$)/.test(l);
+                      let n=0;
+                      let boxes=[...dlg.querySelectorAll(SEL)];
+                      boxes=boxes.filter(el=>!boxes.some(o=>o!==el&&o.contains(el)));
+                      // group by wrapper (2+ boxes) — group mein koi on nahi to pehla non-neg
+                      const wrapOf=el=>{let c=el.parentElement,d=0;while(c&&d<10){if(c.querySelectorAll(SEL).length>=2)return c;c=c.parentElement;d++;}return null;};
+                      const G=new Map(),L=[];
+                      boxes.forEach(el=>{const w=wrapOf(el);if(w){if(!G.has(w))G.set(w,[]);G.get(w).push(el);}else L.push(el);});
+                      for(const els of G.values()){
+                        if(els.some(isOn))continue;
+                        const p=els.find(e=>!isNeg(labOf(e)))||els[0];
+                        const t=p.closest('label')||p; try{t.click();n++;}catch(e){}
+                      }
+                      for(const el of L){
+                        if(isOn(el)||isNeg(labOf(el)))continue;
+                        const t=el.closest('label')||el; try{t.click();n++;}catch(e){}
+                      }
+                      return n;
+                    }
+                """)
+                if forced:
+                    ticked += forced
+                    send_ui("log", text=f"   ☑️ forced {forced} option(s)")
+            except Exception:
+                pass
         await sleep(rand_delay(0.5, 0.9))
 
     # ── Last-resort (rare): Submit ABHI bhi disabled -> keyword affirmative
@@ -1219,6 +1261,57 @@ async def get_group_info(page):
     header_txt = text[:600].lower()
     is_canada  = any(m in header_txt for m in CANADA_MARKERS)
     return members, privacy, already, page_blocked, is_canada, post_disabled
+
+
+# Account-level block / checkpoint markers (page body text, lowercase)
+ACCOUNT_BLOCK_MARKERS = [
+    "confirm your identity", "we need to confirm", "help us confirm",
+    "temporarily locked", "temporarily blocked", "temporarily restricted",
+    "your account has been temporarily", "you're restricted from",
+    "your account is restricted", "account has been disabled",
+    "you can't use facebook", "you cannot use facebook",
+    "this feature isn't available right now", "this feature isn’t available right now",
+    "you can't use this feature right now", "you cannot use this feature",
+    "you're doing that too much", "you’re doing that too much",
+    "we limit how often", "action blocked",
+    "unusual activity", "suspicious activity", "security check",
+    "solve this puzzle", "enter the code we", "enter security code",
+    "please try again later",
+]
+# Sirf join karne ki limit — pending requests bharay hue
+PENDING_LIMIT_MARKERS = [
+    "you've reached the limit", "you have reached the limit",
+    "reached the limit for join", "requested to join too many",
+    "too many groups", "too many pending",
+    "wait for a decision on some", "cancel some of your",
+    "can't join any more groups", "cannot join any more groups",
+    "limit for the number of groups",
+]
+
+
+async def check_account_block(page, body_text: str = None) -> str:
+    """Account checkpoint/block detect. Reason string ya '' return."""
+    try:
+        if page.url and "/checkpoint/" in page.url:
+            return "checkpoint page"
+        t = (body_text if body_text is not None
+             else await page.inner_text("body")).lower()
+    except Exception:
+        return ""
+    for m in ACCOUNT_BLOCK_MARKERS:
+        if m in t:
+            return m
+    # login page pe redirect = session mar gayi
+    if ("log in" in t or "log into facebook" in t) and 'name="pass"' in \
+            (await page.content()).lower():
+        return "logged out (session expired)"
+    return ""
+
+
+def check_pending_limit(body_text: str) -> bool:
+    t = (body_text or "").lower()
+    return any(m in t for m in PENDING_LIMIT_MARKERS)
+
 
 def _parse_count(s: str) -> int:
     """'1.2K' -> 1200, '3M' -> 3000000, '234' -> 234, '1,050' -> 1050"""
@@ -1461,33 +1554,69 @@ async def switch_via_link(page, page_link, page_name=""):
             pass
 
         # Switch button dhundo (Facebook alag alag labels use karta hai)
+        clicked_switch = False
         for sw_sel in ['[aria-label="Switch Now"]', 'text="Switch Now"',
                        '[aria-label="Switch to Page"]', 'text="Switch to Page"',
                        'div[aria-label="Switch"][role="button"]',
+                       '[aria-label*="Switch into"]',
+                       '[role="button"]:has-text("Switch Now")',
+                       '[role="button"]:has-text("Switch to")',
                        '[role="button"]:has-text("Switch")']:
             try:
                 sw = page.locator(sw_sel).first
                 if await sw.is_visible(timeout=1500):
                     await sw.click()
-                    await sleep(rand_delay(2, 3))
+                    clicked_switch = True
+                    send_ui("log", text=f"   Clicked switch button ({sw_sel})")
+                    await sleep(rand_delay(2, 3.5))
+                    # confirm dialog?
+                    for c in ['[role="dialog"] [aria-label="Switch"]',
+                              '[role="dialog"] div[role="button"]:has-text("Switch")',
+                              '[role="dialog"] [aria-label="Continue"]']:
+                        try:
+                            cb = page.locator(c).first
+                            if await cb.is_visible(timeout=1200):
+                                await cb.click()
+                                await sleep(rand_delay(2, 3))
+                        except:
+                            pass
                     break
             except:
                 pass
 
         await dismiss_popups(page)
-        # Verify — SPA dheere load hota hai, 16 sec tak retry
-        for _ in range(8):
-            try:
-                if await page.locator('text="Manage Page"').first.is_visible(timeout=1500):
-                    send_ui("log", text="   ✅ Switched via link (verified)")
-                    return True
-            except:
-                pass
+        # Verify — SPA dheere load hota hai, 20 sec tak retry
+        for _ in range(10):
+            for t in ['text="Manage Page"', 'text="Professional dashboard"',
+                      '[aria-label="Switch back to profile"]']:
+                try:
+                    if await page.locator(t).first.is_visible(timeout=1000):
+                        send_ui("log", text="   ✅ Switched via link (verified)")
+                        return True
+                except Exception:
+                    pass
             if page_name and await _verify_switched(page, page_name):
                 send_ui("log", text="   ✅ Switched via link (verified)")
                 return True
+            # "Switch Now" ab dikh nahi raha + page URL par hain = shayad switch ho gaya
+            try:
+                still_switch = await page.locator(
+                    '[role="button"]:has-text("Switch Now")').first.is_visible(timeout=800)
+            except Exception:
+                still_switch = False
+            if clicked_switch and not still_switch:
+                send_ui("log", text="   ✅ Switch button gone — treating as switched")
+                return True
             await sleep(2)
 
+        # diagnose: screen par kya hai
+        try:
+            btns = await page.evaluate("""() => [...document.querySelectorAll(
+                '[role=button],button')].map(b=>(b.getAttribute('aria-label')||b.innerText||'')
+                .trim()).filter(x=>x && x.length<40).slice(0,25)""")
+            send_ui("log", text=f"   screen buttons: {btns}")
+        except:
+            pass
         await ss(page, "02_link_switch_fail")
         send_ui("log", text="   ⚠️  Link opened but switch could not be verified")
         return False
@@ -1818,6 +1947,29 @@ async def join_one_group(page, url, name, area, config):
         await sleep(rand_delay(1, 2))
         await dismiss_popups(page)
 
+        # ── Account block / checkpoint? -> foran STOP + alert ──
+        try:
+            body_txt = await page.inner_text("body")
+        except Exception:
+            body_txt = ""
+        blk = await check_account_block(page, body_txt)
+        if blk:
+            send_ui("log", text=f"🚫 ACCOUNT BLOCK: '{blk}' — bot rok raha hai")
+            _a = config.get("_activity")
+            if _a:
+                try:
+                    _a.alert(f"ACCOUNT CHECKPOINT / BLOCK ({blk}) — bot stopped. "
+                             f"Is account ko kuch din araam do.")
+                except Exception:
+                    pass
+            try:
+                await ss(page, "account_block")
+            except Exception:
+                pass
+            config["_end_reason"] = "account_blocked"
+            stop_event.set()
+            return "blocked"
+
         members, privacy, already, page_blocked, is_canada, post_disabled = \
             await get_group_info(page)
 
@@ -1905,6 +2057,41 @@ async def join_one_group(page, url, name, area, config):
             return "skipped"
 
         await sleep(rand_delay(1.5, 2.5))
+
+        # ── Join dabane ke baad: pending-request limit ya account block? ──
+        try:
+            after_txt = await page.inner_text("body")
+        except Exception:
+            after_txt = ""
+        if check_pending_limit(after_txt):
+            send_ui("log", text="⏸️  Join-request limit reached (pending groups full) — bot rok raha hai")
+            _a = config.get("_activity")
+            if _a:
+                try:
+                    _a.alert("JOIN-REQUEST LIMIT reached — bahut se pending requests hain. "
+                             "Bot stopped. Kuch requests approve/cancel hone do, phir chalao.")
+                except Exception:
+                    pass
+            try:
+                await ss(page, "pending_limit")
+            except Exception:
+                pass
+            config["_end_reason"] = "pending_limit"
+            stop_event.set()
+            return "blocked"
+        blk2 = await check_account_block(page, after_txt)
+        if blk2:
+            send_ui("log", text=f"🚫 ACCOUNT BLOCK after join: '{blk2}' — bot rok raha hai")
+            _a = config.get("_activity")
+            if _a:
+                try:
+                    _a.alert(f"ACCOUNT BLOCK ({blk2}) after a join — bot stopped.")
+                except Exception:
+                    pass
+            config["_end_reason"] = "account_blocked"
+            stop_event.set()
+            return "blocked"
+
         await select_page(page, config.get("page_name", ""))
         await handle_questions(page)
 
@@ -2015,7 +2202,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
             _pa = config.get("_activity")
             if _pa:
                 try:
-                    _pa.record_skip()
+                    _pa.record_skip("low_members")
                 except Exception:
                     pass
             continue
@@ -2033,6 +2220,9 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
         status = await join_one_group(page, group_url, name, city, config)
 
         _act = config.get("_activity")
+        if status == "blocked":
+            # account block / pending-limit -> join_one_group ne stop_event set kiya
+            break
         if status == "joined":
             joined += 1
             already_joined.add(group_url)
@@ -2048,7 +2238,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
             send_ui("skipped")
             if _act:
                 try:
-                    _act.record_skip()
+                    _act.record_skip(_LAST_CSV_STATUS)
                 except Exception:
                     pass
 
@@ -2153,6 +2343,21 @@ async def playwright_main(config):
                         act.heartbeat()
                     except Exception:
                         pass
+                # account block periodically bhi check karo (current page)
+                try:
+                    blk = await check_account_block(page)
+                except Exception:
+                    blk = ""
+                if blk:
+                    send_ui("log", text=f"🚫 ACCOUNT BLOCK (watchdog): '{blk}' — stopping")
+                    if act:
+                        try:
+                            act.alert(f"ACCOUNT CHECKPOINT / BLOCK ({blk}) — bot stopped.")
+                        except Exception:
+                            pass
+                    config["_end_reason"] = "account_blocked"
+                    stop_event.set()
+                    return
                 chk = lic.validate_key(config.get("license_key", ""))
                 if not chk["ok"]:
                     send_ui("log", text=f"⛔ License: {chk['error']}")
@@ -2221,13 +2426,67 @@ async def playwright_main(config):
                 pass
         except Exception:
             pass
-        if config.get("_end_reason") != "license_expired":
+        if config.get("_end_reason") not in ("license_expired", "account_blocked",
+                                             "pending_limit", "setup_failed"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         send_ui("log", text=f"\n🎉 Done! This session: joined {joined_today} groups, skipped {skipped_today}.")
         send_ui("log", text="✅ Session complete!")
         await ctx.close()
         send_ui("stopped")
+
+async def _login_browser_main():
+    """Sirf browser kholo Facebook pe — user login karega, joining kuch
+    nahi. User window band karega -> session save -> ho gaya."""
+    async with async_playwright() as p:
+        send_ui("log", text="🌐 Browser khul raha hai — Facebook pe login karo…")
+        ctx = await p.chromium.launch_persistent_context(
+            user_data_dir=PW_PROFILE_DIR, headless=False,
+            args=["--start-maximized", "--disable-notifications"],
+            viewport={"width": 1366, "height": 768},
+        )
+        closed = {"v": False}
+        ctx.on("close", lambda *a: closed.__setitem__("v", True))
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        try:
+            await page.goto("https://www.facebook.com", wait_until="domcontentloaded",
+                            timeout=20000)
+        except Exception:
+            pass
+        send_ui("log", text="   👉 Login karo, phir browser window BAND kar do (ya STOP dabao).")
+        # user ke band karne / stop_event tak intezar
+        while not closed["v"] and not stop_event.is_set():
+            await sleep(1)
+            try:
+                if not ctx.pages:      # saari windows band
+                    break
+            except Exception:
+                break
+        logged_in = False
+        try:
+            if ctx.pages:
+                try:
+                    logged_in = await ctx.pages[0].locator(
+                        '[role="navigation"]').count() > 0
+                except Exception:
+                    logged_in = False
+            await ctx.close()
+        except Exception:
+            pass
+        send_ui("log", text=("✅ Login session save ho gaya — ab START dabao."
+                             if logged_in else
+                             "ℹ️ Browser band. Agar login nahi hua to dobara "
+                             "'Open browser' dabao."))
+    send_ui("login_done")
+
+
+def run_login_browser():
+    try:
+        asyncio.run(_login_browser_main())
+    except Exception as e:
+        send_ui("log", text=f"login browser error: {str(e)[:80]}")
+        send_ui("login_done")
+
 
 def run_playwright(config):
     # ── License gate — the bot does not run without a valid key ──
@@ -2329,6 +2588,7 @@ class App:
         self.joined_today   = 0
         self.skipped_today  = 0
         self.running        = False
+        self._login_open    = False
         self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
 
         self._style()
@@ -2724,6 +2984,15 @@ class App:
                              command=self._toggle, pady=12)
         self.btn.pack(side="bottom", fill="x", pady=(8, 0))
 
+        # Alag "browser kholo + Facebook login karo" button — joining shuru
+        # nahi hoti, sirf browser khulta hai. Login karke window band karo.
+        self.login_btn = tk.Button(left, text="🔓  Open browser & log in to Facebook",
+                                   bg=INPUT_BG, fg=TXT, font=("Segoe UI", 9),
+                                   relief="flat", cursor="hand2",
+                                   activebackground=BORDER, activeforeground=TXT,
+                                   command=self._open_login, pady=6)
+        self.login_btn.pack(side="bottom", fill="x", pady=(8, 0))
+
         _sc = tk.Frame(left, bg=BG)
         _sc.pack(side="top", fill="both", expand=True)
         _canvas = tk.Canvas(_sc, bg=BG, highlightthickness=0)
@@ -2934,6 +3203,21 @@ class App:
         setattr(self, f"{name}_var", v)
         return v
 
+    def _open_login(self):
+        if self.running:
+            return
+        if getattr(self, "_login_open", False):
+            # dobara dabaya -> login browser band karo
+            stop_event.set()
+            self.login_btn.config(text="🌐  Closing…")
+            return
+        self._login_open = True
+        stop_event.clear()
+        self.login_btn.config(text="🌐  Browser open — log in, then click here / close it")
+        self.btn.config(state="disabled")
+        self.status_var.set("●  Login browser open…")
+        threading.Thread(target=run_login_browser, daemon=True).start()
+
     def _toggle(self):
         if self.running:
             stop_event.set()
@@ -2941,6 +3225,10 @@ class App:
             self.status_var.set("●  Stopping...")
             self.running = False
         else:
+            if getattr(self, "_login_open", False):
+                messagebox.showinfo("Login browser open",
+                                    "Pehle login browser band karo, phir START.")
+                return
             # ── License check — no START without a valid key ──
             info = lic.validate_key(lic.load_active_key())
             if not info["ok"]:
@@ -3033,9 +3321,18 @@ class App:
                     self._update_stats()
                 elif t in ("total", "total_skipped"):
                     pass  # All-time counters UI se hata diye — files mein ab bhi save hote hain
+                elif t == "login_done":
+                    self._login_open = False
+                    self.login_btn.config(
+                        text="🔓  Open browser & log in to Facebook", state="normal")
+                    self.status_var.set("●  Login done — press START")
+                    self._refresh_license_ui()
                 elif t == "stopped":
                     self.running = False
+                    self._login_open = False
                     self.btn.config(text="▶   START", bg=GREEN)
+                    self.login_btn.config(
+                        text="🔓  Open browser & log in to Facebook", state="normal")
                     self.status_var.set("●  Idle — press START to begin")
                     self.now_target_var.set("Search: —")
                     self._log(f"📊 This session: {self.joined_today} joined | {self.skipped_today} skipped")
