@@ -237,8 +237,21 @@ CURRENT_CITY = ""
 # rate-limit (HTTP 429 / RESOURCE_EXHAUSTED) lag jaye, bot us key ko thodi
 # der ke liye "cooldown" mein daal ke agli key pe switch kar deta hai —
 # taake AI answers din bhar chalte rahen. Saari keys thak jayein to us
-# sawaal ka jawab built-in template se chala jata hai (joining nahi rukti).
+# sawaal ka jawab built-in template se chala jata hai (joining nahi rukti) —
+# LEKIN agar Gemini AI ON kiya gaya hai (keys diye gaye hain) aur EK round
+# mein SAARI keys fail/rate-limited ho jayein, to policy ye hai ke "fake"
+# template answers pe chupke se chalte rehne ke bajaye bot FORAN rok do +
+# Discord alert bhejo (neeche _gemini_sync dekho).
 GEMINI_MODEL = "gemini-flash-lite-latest"   # verified working; auto-switches if deprecated
+# Agar GEMINI_MODEL "high demand" (503) de ya deprecated (404) nikle, bot
+# isi list se agla model try karta hai (SAME api key — sirf model badalta
+# hai, keys nahi). Sab live-verified working models hain.
+GEMINI_MODEL_FALLBACKS = [
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+]
 GEMINI_KEYS = []          # run_playwright() config se set hoti hai
 GEMINI_ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
                    "models/{model}:generateContent")
@@ -247,6 +260,11 @@ SETTINGS_FILE = os.path.join(APP_DIR, "bot_settings.json")
 _gk_idx = 0               # abhi kaunsi key use ho rahi hai
 _gk_cooldown = {}         # key -> monotonic time tak woh key skip karni hai
 _GK_COOLDOWN_SEC = 90     # 429 ke baad key kitni der aaram kare
+
+_ACT = None               # current session ka ActivityLog — module-level
+                          # functions (jaise _gemini_sync) se bhi Discord
+                          # alert bhejne ke liye
+_GEMINI_DEAD_REASON = None  # set hota hai jab saari Gemini keys fail ho jayein
 
 
 def load_settings() -> dict:
@@ -320,7 +338,22 @@ def resolve_gemini_keys(ui_val: str = "") -> list:
 
 
 def _gemini_once(api_key, question, city):
-    """Ek key se ek call. Return: text | 'RATELIMIT' | None (aur error)."""
+    """
+    Ek key se ek call. Return: text | 'RATELIMIT' | 'ERROR' | None.
+
+    Same key ke saath, agar GEMINI_MODEL "high demand" (503), rate-limited
+    (429/403) ya deprecated (404) nikle, to isi call ke andar hi
+    GEMINI_MODEL_FALLBACKS list se agla model try karta hai — SAME API key,
+    bas model badalta hai (AQ./AIza keys sab Gemini models pe kaam karti
+    hain). Gemini free-tier ka rate-limit per-MODEL hota hai, per-key nahi —
+    isliye ek model par 429 aane ka matlab ye nahi ke yehi key doosre model
+    par bhi rate-limited hogi. Jo model kaam kar jaye wahi GEMINI_MODEL ban
+    jata hai taake agli har call seedhi usi se shuru ho.
+
+    'RATELIMIT' sirf tab return hota hai jab is key ke saath SAARE
+    (chaaron) fallback models rate-limited nikle — tabhi is key ko
+    cooldown mein daala jata hai (_gk_one_pass mein).
+    """
     where = _city_pretty() or city or "the local area"
     rules = (
         "You are a real local resident in the USA"
@@ -347,46 +380,51 @@ def _gemini_once(api_key, question, city):
     global GEMINI_MODEL
     # Har key (AIza... ya AQ...) x-goog-api-key header se — Bearer 401 deta hai
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    for _try in range(2):
-        url = GEMINI_ENDPOINT.format(model=GEMINI_MODEL)
+
+    candidates = [GEMINI_MODEL] + [m for m in GEMINI_MODEL_FALLBACKS if m != GEMINI_MODEL]
+    all_ratelimited = True   # sab candidates try karne ke baad bhi True rahe
+                             # to matlab: is key ka HAR model par quota khatam
+    for model in candidates:
+        url = GEMINI_ENDPOINT.format(model=model)
         try:
             req = urllib.request.Request(url, data=body, headers=headers)
             with urllib.request.urlopen(req, timeout=20) as r:
                 data = json.loads(r.read().decode("utf-8"))
             txt = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            if model != GEMINI_MODEL:
+                send_ui("log", text=f"   ↪ Gemini model {GEMINI_MODEL} busy/unavailable "
+                                    f"→ switched to {model}")
+                GEMINI_MODEL = model
             return txt.strip('"').strip() or None
         except urllib.error.HTTPError as e:
             if e.code in (429, 403):
-                return "RATELIMIT"
-            if e.code == 404 and _try == 0:
-                # "no longer available ... use models/gemini-X.Y-flash" -> switch
-                try:
-                    msg = e.read().decode("utf-8", "replace")
-                except Exception:
-                    msg = ""
-                m = re.search(r"use\s+models/([a-zA-Z0-9._-]+)", msg)
-                if m and m.group(1) != GEMINI_MODEL:
-                    send_ui("log", text=f"   ↪ Gemini model {GEMINI_MODEL} deprecated "
-                                        f"→ switching to {m.group(1)}")
-                    GEMINI_MODEL = m.group(1)
-                    continue
-            return "ERROR"       # 400/500/etc — is key se na sahi, agli try karo
+                continue    # is model par rate-limit — agla model try karo
+                            # (per-key quota per-model hoti hai, blanket nahi)
+            all_ratelimited = False
+            if e.code in (503, 404):
+                # 503 high-demand / 404 deprecated -> isi key se agla model try karo
+                if e.code == 404:
+                    try:
+                        msg = e.read().decode("utf-8", "replace")
+                    except Exception:
+                        msg = ""
+                    m = re.search(r"use\s+models/([a-zA-Z0-9._-]+)", msg)
+                    if m and m.group(1) not in candidates:
+                        candidates.append(m.group(1))
+                continue
+            return "ERROR"       # 400/500/etc — is key se na sahi, agli key try karo
         except Exception:
-            return "ERROR"       # timeout / network — agli key try karo
-    return "ERROR"
+            all_ratelimited = False
+            continue              # timeout/network — agla model bhi try kar lo
+
+    # Yahan pahunche matlab is key ke saath koi bhi model kaam nahi kiya.
+    return "RATELIMIT" if all_ratelimited else "ERROR"
 
 
-def _gemini_sync(question, city):
-    """
-    Keys ke pool par rotate karke jawab lao. HAR sawaal ke liye Gemini
-    hi try hota hai — sirf tab template pe jate hain jab EK bhi key kaam
-    na kare (saari rate-limited / error).
-    """
+def _gk_one_pass(question, city, keys, n):
+    """Ek round — saari keys pe ek-ek baar try karo (jo cooldown mein nahi
+    hain). Jawab mile to wapas karo, warna None."""
     global _gk_idx
-    keys = GEMINI_KEYS
-    n = len(keys)
-    if n == 0:
-        return None
     now = time.monotonic()
     i = _gk_idx % n
     for tried in range(n):
@@ -402,7 +440,61 @@ def _gemini_sync(question, city):
                 _gk_idx = i           # is key pe tik jao jab tak chale
                 return res
         i = (i + 1) % n
-    send_ui("log", text="   ⏳ All Gemini keys busy — template answer this time")
+    return None
+
+
+def _gemini_sync(question, city):
+    """
+    Keys ke pool par rotate karke jawab lao. HAR sawaal ke liye Gemini
+    hi try hota hai.
+
+    Agar AI answers ON hain (keys diye gaye) aur is round mein SAARI keys
+    fail/rate-limited nikle — matlab AI answers filhaal bilkul available
+    nahi — to chupke se template pe fallback nahi karte (owner ki policy:
+    sab jawab AI se hi dene hain). Iske bajaye: bot ROK do + Discord alert
+    bhejo, taake owner naya key de sake ya thodi der baad khud restart kare.
+
+    LEKIN foran hi mar ke baith jane se pehle EK chhoti retry (~6 sec baad)
+    deta hai — kyunki "saari keys ek saath fail" kabhi Google ke apne
+    temporary "high demand" (503) ya network blip ki wajah se bhi ho sakta
+    hai (asal keys bilkul theek hote hue bhi), na ke keys genuinely dead
+    hone ki wajah se. Agar keys sach mein rate-limited (429) hain to woh
+    to cooldown mein hi rahengi aur retry bhi turant fail hoga — is case
+    mein rukna abhi bhi turant (~6 sec) hi hota hai.
+    """
+    global _GEMINI_DEAD_REASON
+    keys = GEMINI_KEYS
+    n = len(keys)
+    if n == 0:
+        return None
+
+    ans = _gk_one_pass(question, city, keys, n)
+    if ans:
+        return ans
+
+    send_ui("log", text="   ⏳ All keys failed this round — retrying once "
+                        "before giving up (may be a temporary blip)...")
+    time.sleep(6)
+    ans = _gk_one_pass(question, city, keys, n)
+    if ans:
+        return ans
+
+    # Retry ke baad bhi saari keys fail — ab genuinely maano ke AI se koi
+    # jawab nahi mil sakta. Sirf pehli baar hi alert + stop (baar-baar
+    # Discord spam na ho).
+    if not stop_event.is_set():
+        send_ui("log", text=f"⛔ All {n} Gemini API key(s) failing/rate-limited "
+                             f"— stopping bot (AI answers required, no fallback).")
+        _GEMINI_DEAD_REASON = "gemini_keys_failed"
+        if _ACT:
+            try:
+                _ACT.alert(f"⚠️ GEMINI API KEYS DOWN — saari {n} key(s) "
+                           f"rate-limited/error ho gayi hain. Bot ROK diya "
+                           f"gaya hai. Naye/extra Gemini keys chahiye ya "
+                           f"thodi der baad dobara START karo.")
+            except Exception:
+                pass
+        stop_event.set()
     return None
 
 
@@ -2495,9 +2587,11 @@ async def playwright_main(config):
                 pass
         except Exception:
             pass
-        if config.get("_end_reason") not in ("license_expired", "account_blocked",
-                                             "pending_limit", "setup_failed",
-                                             "files_updated"):
+        if _GEMINI_DEAD_REASON:
+            config["_end_reason"] = _GEMINI_DEAD_REASON
+        elif config.get("_end_reason") not in ("license_expired", "account_blocked",
+                                                "pending_limit", "setup_failed",
+                                                "files_updated"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         send_ui("log", text=f"\n🎉 Done! This session: joined {joined_today} groups, skipped {skipped_today}.")
@@ -2618,10 +2712,11 @@ def run_playwright(config):
         return
 
     # ── Gemini AI answers (optional, key rotation) ──
-    global GEMINI_KEYS, _gk_idx
+    global GEMINI_KEYS, _gk_idx, _GEMINI_DEAD_REASON
     GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
     _gk_idx = 0
     _gk_cooldown.clear()
+    _GEMINI_DEAD_REASON = None   # purani run ka stale flag na reh jaye
     send_ui("log", text=(f"🤖 AI answers ON ({GEMINI_MODEL}) — {len(GEMINI_KEYS)} key(s) in rotation")
             if GEMINI_KEYS else "💬 AI answers OFF — using built-in template answers")
 
@@ -2638,6 +2733,8 @@ def run_playwright(config):
     # ── Usage log shuru (+ live report agar REPORT_URL set hai) ──
     act = ActivityLog(config.get("employee", "unknown"), config.get("key_id", ""),
                       config.get("license_exp", ""), INSTANCE)
+    global _ACT
+    _ACT = act
     try:
         act.set_machine(lic.machine_id())
     except Exception:
