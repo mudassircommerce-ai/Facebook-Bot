@@ -52,6 +52,59 @@ def _report_url() -> str:
         return ""
 
 
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
+
+
+def _send_chat_text(text: str, sync: bool = False) -> None:
+    """Ek raw text Discord/Telegram pe bhejo — ActivityLog instance ke
+    BINA (module-level). Startup tamper-check jaise cases ke liye, jahan
+    abhi employee ka ActivityLog bana hi nahi hota.
+
+    sync=True: background thread ke bajaye isi thread mein bhejo aur
+    wapas aane tak wait karo (timeout tak) — jab caller alert ke turant
+    baad process restart/exit karne wala ho, taake message poora jaane
+    se pehle hi process na mar jaye."""
+    url = _report_url()
+    if not url:
+        return
+    low = url.lower()
+    is_discord = "discord.com/api/webhooks" in low or "discordapp.com/api/webhooks" in low
+    is_tg = "api.telegram.org/bot" in low
+    if is_discord:
+        target = url
+        body = json.dumps({"content": text[:1900]}).encode("utf-8")
+    elif is_tg:
+        sep = "&" if "?" in url else "?"
+        target = f"{url}{sep}text={urllib.parse.quote(text)}&parse_mode=Markdown"
+        body = None
+    else:
+        return
+
+    def work():
+        try:
+            hdrs = {"User-Agent": _UA}
+            if body is None:
+                req = urllib.request.Request(target, headers=hdrs)
+            else:
+                hdrs["Content-Type"] = "application/json"
+                req = urllib.request.Request(target, data=body, headers=hdrs)
+            urllib.request.urlopen(req, timeout=8).read()
+        except Exception:
+            pass
+
+    if sync:
+        work()
+    else:
+        threading.Thread(target=work, daemon=True).start()
+
+
+def send_alert(employee: str, text: str, sync: bool = False) -> None:
+    """Module-level alert — ActivityLog ke bina bhi (startup/updater
+    tamper-detection ke liye)."""
+    _send_chat_text(f"🚨  **{employee or 'unknown'}**\n{text}", sync=sync)
+
+
 class ActivityLog:
     """
     Bot ke andar ek instance banta hai. Thread-safe (UI thread se bhi
@@ -265,37 +318,7 @@ class ActivityLog:
     def _push_text(self, text: str) -> None:
         """Ek raw message Discord/Telegram pe (throttle nahi). JSON endpoint
         par sirf normal _summary jata hai (text nahi)."""
-        url = _report_url()
-        if not url:
-            return
-        low = url.lower()
-        is_discord = "discord.com/api/webhooks" in low or "discordapp.com/api/webhooks" in low
-        is_tg = "api.telegram.org/bot" in low
-        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
-        if is_discord:
-            target = url
-            body = json.dumps({"content": text[:1900]}).encode("utf-8")
-        elif is_tg:
-            sep = "&" if "?" in url else "?"
-            target = f"{url}{sep}text={urllib.parse.quote(text)}&parse_mode=Markdown"
-            body = None
-        else:
-            return  # JSON endpoints ke liye alert-text nahi (unhe _summary milta hai)
-
-        def work():
-            try:
-                hdrs = {"User-Agent": ua}
-                if body is None:
-                    req = urllib.request.Request(target, headers=hdrs)
-                else:
-                    hdrs["Content-Type"] = "application/json"
-                    req = urllib.request.Request(target, data=body, headers=hdrs)
-                urllib.request.urlopen(req, timeout=8).read()
-            except Exception:
-                pass
-
-        threading.Thread(target=work, daemon=True).start()
+        _send_chat_text(text)
 
     def end_session(self, reason: str = "app_closed") -> None:
         with self._lock:

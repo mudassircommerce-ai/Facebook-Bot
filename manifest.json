@@ -1,15 +1,15 @@
 {
- "version": 19,
+ "version": 24,
  "files": {
   "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
   "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
-  "activity.py": "089452746f39518313058c9b509c8f2062107f31c88d52cbb0fae730ae5083aa",
+  "activity.py": "31dabd6a8fb5e5a7eb7729d14e26a84ed2d73d350c8abdec02ea1a122b33c80f",
   "areas.py": "ed2a1eaa516dd3741ae41b0f6017710a4e2ce2c038e1287c4b66c757e44f03b0",
   "areas_cache.json": "5045780201dd96ac556055645c111ed416f331397ae80f711b29a75210c0a03a",
-  "fb_joiner.py": "280d3ac964a7809b34ae8cbfdfe746df789adf65afe1d3d5ea620af3eef0abd8",
+  "fb_joiner.py": "01cb51d13b7525867094f743c23940623f40e3ee086b89a1d899938dfb168480",
   "license_common.py": "5d147f68abcd8d2bf745e35f368eb9e04c4d0be9ccc150708c78246bbdf50e6b",
   "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
-  "updater.py": "af0b0ec29c4c32f0821f459bdc9fe8ec40b3a1d6d15a1efbc90491f682c23544"
+  "updater.py": "a88ff992a0f8d73466dc5e0358b1d2872f67a020d35793592a7e0f434e12660d"
  },
- "sig": "bZN3hEPtCeNO2pwAo8uwsmrUhmAnllc-vsCt6j2PpyaSwZk_HjOutCfBetM-zZIP7xPKzAGPmXxDva8NRJX6qC4Rpg-Ko3SPRU9AXlL1womNKB8FNSnTGxUQ5bMog8NAOs-n7zOXLvYDoJ5eYeqnhAtYbK-xkNyD3uUNYhl4eIrTwYKl82BVf3RPFTS4XJx_dirrCdiJ9XThunNCRysqZfJTsig6Z85ZMS_NNYSOqsHw9yMSnfINKZ62y4YTHrxtLgDBqn67NrwSdTU5IWuDFZQ5b-HCq60V9htGEM1oa0KSg91mYjx0wB6PFO_h9pq8cDzgLZEuT1lHU1cuKeGHQQ"
+ "sig": "PsytKR0Fn571YTKLJFaQIXDgZ2HMeQFWkmLufqYCC3U2JZykVySgGU_MykZqzVojQ0xu2pwYqEdi26Nf0j8lkHkPZrJjr4z1oPkjFYN8_tb3IjHEAAqK-Dl7EOxR-mCrPSpXPwcgEVjIwXU7xk-1Wa49EPd3rNlvzeeJNYGlnn9tKe682n8vhlYyoPMYmTwzzTwCM3M858LsUTbDzM_htWaO1oRaKUaqhGixrPr4ZJItGoimcqtZOhhQmTUsnp14nd-VWHMF53EB0ORHITBDTEC19385TntLOJBEx3DCwwJWpGIQb5ihLwCmINBunSd1GblmcA3Lh0kWkp72n_f3dg"
 }

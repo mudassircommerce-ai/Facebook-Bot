@@ -116,9 +116,15 @@ DEFAULT_DONT_JOIN = [
     "lgbt", "lgbtq", "lgbtqia", "queer", "lesbian", "transgender",
     "non-binary", "nonbinary", "pride community", "pride month",
     "gay men", "gay community",
-    # non-english
-    "en espanol", "espanol", "grupo de", "latinos", "hispano", "hispanos",
-    "portugues", "vietnamese community", "chinese community",
+    # non-english (Spanish / Portuguese-Brazilian / other) — English only
+    "en espanol", "en español", "espanol", "español", "solo espanol",
+    "solo español", "se habla espanol", "hispanohablantes", "comunidad hispana",
+    "grupo hispano", "grupo de", "grupo latino", "latinos", "latinas",
+    "hispano", "hispanos", "hispana", "para hispanos", "amigos latinos",
+    "portugues", "português", "em portugues", "em português", "so portugues",
+    "só português", "falamos portugues", "comunidade brasileira",
+    "brasileiros", "brasileiras", "amigos brasileiros", "grupo brasileiro",
+    "vietnamese community", "chinese community", "grupo chino",
     # construction / housing / real estate
     "construction", "house rent", "for rent", "houses for rent",
     "apartments for rent", "rental", "rentals", "roommate", "roommates",
@@ -150,6 +156,28 @@ CANADA_MARKERS = [
     "manitoba", "saskatchewan", "quebec", "nova scotia",
     "new brunswick", "newfoundland", "prince edward island",
 ]
+
+# English-only policy — koi bhi group jiska naam English lage lekin content
+# Spanish/Portuguese (Brazilian) mein ho, usse bhi pakadne ke liye. Ye
+# alfaz English mein normally nahi aate (accented / bilkul distinctive),
+# isliye 1-2 match false-positive risk kam rakhte hain, 2+ pe hi skip.
+NON_ENGLISH_MARKERS = [
+    "¿", "¡", "años", "gracias", "bienvenidos", "bienvenidas", "está",
+    "cómo estás", "qué tal", "hola a todos", "muchas gracias",
+    "buenos días", "buenas tardes", "buenas noches", "únete al grupo",
+    "somos un grupo", "grupo para", "se habla español",
+    "não", "então", "você", "vocês", "obrigado", "obrigada",
+    "bem-vindo", "bem-vindos", "olá pessoal", "tudo bem",
+    "somos uma comunidade", "grupo para todos os",
+]
+
+
+def detect_non_english(text: str) -> str:
+    """Header text mein Spanish/Portuguese ke 2+ distinctive alfaz milen
+    to us group ko non-English maano (naam English ho tab bhi)."""
+    t = (text or "").lower()
+    hits = sum(1 for m in NON_ENGLISH_MARKERS if m in t)
+    return "non-English content" if hits >= 2 else ""
 
 JOIN_ANSWERS = [
     "I'm a local resident looking to connect with my community and stay updated on local events and services.",
@@ -304,7 +332,12 @@ def _gemini_once(api_key, question, city):
         "whether you run or represent a business or want to promote something, say "
         "no - you are just a local resident. If asked whether you are a bot or a "
         "real person, say you are a real person. If asked which city/area you live "
-        f"in, say you live in {where}. Output ONLY the answer text, nothing else."
+        f"in, say you live in {where}. "
+        "LANGUAGE: Always answer in ENGLISH ONLY, no matter what language the "
+        "question is written in. Do not use Spanish, Portuguese, or any other "
+        "language, even if the question itself is in that language - reply in "
+        "English regardless. "
+        "Output ONLY the answer text, nothing else."
     )
     body = json.dumps({
         "system_instruction": {"parts": [{"text": rules}]},
@@ -1260,7 +1293,8 @@ async def get_group_info(page):
     # na ban jaye)
     header_txt = text[:600].lower()
     is_canada  = any(m in header_txt for m in CANADA_MARKERS)
-    return members, privacy, already, page_blocked, is_canada, post_disabled
+    non_english = detect_non_english(text[:1500])
+    return members, privacy, already, page_blocked, is_canada, post_disabled, non_english
 
 
 # Account-level block / checkpoint markers (page body text, lowercase)
@@ -1970,7 +2004,7 @@ async def join_one_group(page, url, name, area, config):
             stop_event.set()
             return "blocked"
 
-        members, privacy, already, page_blocked, is_canada, post_disabled = \
+        members, privacy, already, page_blocked, is_canada, post_disabled, non_english = \
             await get_group_info(page)
 
         if page_blocked:
@@ -2000,6 +2034,11 @@ async def join_one_group(page, url, name, area, config):
         if is_canada:
             send_ui("log", text=f"🍁 Canada group, skip: {name}")
             log_csv(area, name, url, "non_usa", members, privacy)
+            return "skipped"
+
+        if non_english:
+            send_ui("log", text=f"🌐 Non-English group ({non_english}), skip: {name}")
+            log_csv(area, name, url, "non_english", members, privacy)
             return "skipped"
 
         if already:
@@ -2332,6 +2371,7 @@ async def playwright_main(config):
 
         # ── License watchdog — har 2 min: heartbeat + expiry check ──
         act = config.get("_activity")
+        _integrity_ctr = {"n": 0}
 
         async def _license_watchdog():
             while not stop_event.is_set():
@@ -2341,6 +2381,35 @@ async def playwright_main(config):
                 if act:
                     try:
                         act.heartbeat()
+                    except Exception:
+                        pass
+
+                # Har ~10 cycle (~20 min): file-tamper check bhi, taake chal
+                # rahe session ke beech koi file edit/crack na kar sake bina
+                # turant Discord alert liye. Blocking network call hai —
+                # thread mein chalao taake join-loop na ruke.
+                _integrity_ctr["n"] += 1
+                if _integrity_ctr["n"] % 10 == 0:
+                    try:
+                        import updater
+
+                        def _integrity_alert(msg):
+                            if act:
+                                try:
+                                    act.alert(msg)
+                                except Exception:
+                                    pass
+
+                        changed = await asyncio.to_thread(
+                            updater.check_and_apply,
+                            getattr(lic, "UPDATE_URL", ""), APP_DIR,
+                            print, _integrity_alert)
+                        if changed:
+                            send_ui("log", text="🔄 Files were updated/restored on disk — "
+                                                 "bot is stopping. Please restart it.")
+                            config["_end_reason"] = "files_updated"
+                            stop_event.set()
+                            return
                     except Exception:
                         pass
                 # account block periodically bhi check karo (current page)
@@ -2427,7 +2496,8 @@ async def playwright_main(config):
         except Exception:
             pass
         if config.get("_end_reason") not in ("license_expired", "account_blocked",
-                                             "pending_limit", "setup_failed"):
+                                             "pending_limit", "setup_failed",
+                                             "files_updated"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         send_ui("log", text=f"\n🎉 Done! This session: joined {joined_today} groups, skipped {skipped_today}.")
@@ -2486,6 +2556,56 @@ def run_login_browser():
     except Exception as e:
         send_ui("log", text=f"login browser error: {str(e)[:80]}")
         send_ui("login_done")
+
+
+async def _logout_main():
+    """Facebook session (cookies + local storage) clear karo — account
+    suspend/checkpoint hone par employee khud yahan se logout kar sake,
+    dobara login karne ke liye. Browser dikhta nahi (background mein)."""
+    send_ui("log", text="🚪 Facebook se logout ho raha hai…")
+    try:
+        async with async_playwright() as p:
+            ctx = await p.chromium.launch_persistent_context(
+                user_data_dir=PW_PROFILE_DIR, headless=True,
+                args=["--disable-notifications"],
+            )
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            try:
+                await page.goto("https://www.facebook.com/", timeout=30000,
+                                wait_until="domcontentloaded")
+                await page.evaluate(
+                    "() => { try { localStorage.clear(); sessionStorage.clear(); "
+                    "} catch(e) {} }")
+            except Exception:
+                pass
+            await ctx.clear_cookies()
+            logged_out = True
+            try:
+                await page.goto("https://www.facebook.com/", timeout=30000,
+                                wait_until="domcontentloaded")
+                await sleep(2)
+                html = await page.content()
+                logged_out = ("login" in page.url.lower()
+                             or 'name="email"' in html or 'name="pass"' in html)
+            except Exception:
+                pass
+            await ctx.close()
+        send_ui("log", text=("✅ Logout ho gaya — session clear. Dobara login "
+                             "karne ke liye 'Open browser & log in' dabao."
+                             if logged_out else
+                             "⚠️ Logout ki koshish hui lekin verify nahi ho saka "
+                             "— 'Open browser' se check kar lo."))
+    except Exception as e:
+        send_ui("log", text=f"logout error: {str(e)[:80]}")
+    send_ui("logout_done")
+
+
+def run_logout_browser():
+    try:
+        asyncio.run(_logout_main())
+    except Exception as e:
+        send_ui("log", text=f"logout error: {str(e)[:80]}")
+        send_ui("logout_done")
 
 
 def run_playwright(config):
@@ -2589,6 +2709,7 @@ class App:
         self.skipped_today  = 0
         self.running        = False
         self._login_open    = False
+        self._logout_open   = False
         self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
 
         self._style()
@@ -2984,14 +3105,22 @@ class App:
                              command=self._toggle, pady=12)
         self.btn.pack(side="bottom", fill="x", pady=(8, 0))
 
-        # Alag "browser kholo + Facebook login karo" button — joining shuru
-        # nahi hoti, sirf browser khulta hai. Login karke window band karo.
-        self.login_btn = tk.Button(left, text="🔓  Open browser & log in to Facebook",
+        # Account row: login (browser kholo) + logout (session clear —
+        # account suspend/checkpoint ho to employee khud yahan se karega)
+        acct_row = tk.Frame(left, bg=BG)
+        acct_row.pack(side="bottom", fill="x", pady=(8, 0))
+        self.logout_btn = tk.Button(acct_row, text="🚪  Log out",
+                                    bg=INPUT_BG, fg=TXT_MUTED, font=("Segoe UI", 9),
+                                    relief="flat", cursor="hand2",
+                                    activebackground=BORDER, activeforeground=TXT,
+                                    command=self._do_logout, pady=6)
+        self.logout_btn.pack(side="left", padx=(0, 6))
+        self.login_btn = tk.Button(acct_row, text="🔓  Open browser & log in to Facebook",
                                    bg=INPUT_BG, fg=TXT, font=("Segoe UI", 9),
                                    relief="flat", cursor="hand2",
                                    activebackground=BORDER, activeforeground=TXT,
                                    command=self._open_login, pady=6)
-        self.login_btn.pack(side="bottom", fill="x", pady=(8, 0))
+        self.login_btn.pack(side="left", fill="x", expand=True)
 
         _sc = tk.Frame(left, bg=BG)
         _sc.pack(side="top", fill="both", expand=True)
@@ -3204,7 +3333,7 @@ class App:
         return v
 
     def _open_login(self):
-        if self.running:
+        if self.running or getattr(self, "_logout_open", False):
             return
         if getattr(self, "_login_open", False):
             # dobara dabaya -> login browser band karo
@@ -3215,8 +3344,27 @@ class App:
         stop_event.clear()
         self.login_btn.config(text="🌐  Browser open — log in, then click here / close it")
         self.btn.config(state="disabled")
+        self.logout_btn.config(state="disabled")
         self.status_var.set("●  Login browser open…")
         threading.Thread(target=run_login_browser, daemon=True).start()
+
+    def _do_logout(self):
+        if self.running or getattr(self, "_login_open", False) or \
+                getattr(self, "_logout_open", False):
+            return
+        if not messagebox.askyesno(
+                "Log out of Facebook",
+                "Ye is PC/profile ki Facebook login session clear kar dega.\n\n"
+                "Sirf tab karo jab account suspend/checkpoint ho gaya ho aur "
+                "dobara (ya kisi doosre account se) login karna ho.\n\n"
+                "Continue?"):
+            return
+        self._logout_open = True
+        self.logout_btn.config(text="🚪  Logging out…", state="disabled")
+        self.login_btn.config(state="disabled")
+        self.btn.config(state="disabled")
+        self.status_var.set("●  Logging out of Facebook…")
+        threading.Thread(target=run_logout_browser, daemon=True).start()
 
     def _toggle(self):
         if self.running:
@@ -3228,6 +3376,10 @@ class App:
             if getattr(self, "_login_open", False):
                 messagebox.showinfo("Login browser open",
                                     "Pehle login browser band karo, phir START.")
+                return
+            if getattr(self, "_logout_open", False):
+                messagebox.showinfo("Logging out",
+                                    "Logout khatam hone ka intezaar karo, phir START.")
                 return
             # ── License check — no START without a valid key ──
             info = lic.validate_key(lic.load_active_key())
@@ -3256,6 +3408,8 @@ class App:
             self.now_target_var.set("Search: —")
             self.running = True
             self.btn.config(text="⏹   STOP", bg=RED)
+            self.login_btn.config(state="disabled")
+            self.logout_btn.config(state="disabled")
             self.status_var.set("●  Running...")
             config = {
                 "city":        city,
@@ -3325,7 +3479,14 @@ class App:
                     self._login_open = False
                     self.login_btn.config(
                         text="🔓  Open browser & log in to Facebook", state="normal")
+                    self.logout_btn.config(state="normal")
                     self.status_var.set("●  Login done — press START")
+                    self._refresh_license_ui()
+                elif t == "logout_done":
+                    self._logout_open = False
+                    self.logout_btn.config(text="🚪  Log out", state="normal")
+                    self.login_btn.config(state="normal")
+                    self.status_var.set("●  Logged out — press 'Open browser & log in' to sign in again")
                     self._refresh_license_ui()
                 elif t == "stopped":
                     self.running = False
@@ -3333,6 +3494,7 @@ class App:
                     self.btn.config(text="▶   START", bg=GREEN)
                     self.login_btn.config(
                         text="🔓  Open browser & log in to Facebook", state="normal")
+                    self.logout_btn.config(state="normal")
                     self.status_var.set("●  Idle — press START to begin")
                     self.now_target_var.set("Search: —")
                     self._log(f"📊 This session: {self.joined_today} joined | {self.skipped_today} skipped")
@@ -3358,8 +3520,37 @@ def _self_update():
         return
     try:
         import updater
-        if updater.check_and_apply(getattr(lic, "UPDATE_URL", ""), APP_DIR):
-            os.execl(sys.executable, sys.executable, *sys.argv)
+
+        # Tamper-alert ke liye employee ka naam pata karo (agar activated
+        # hai) — ActivityLog abhi nahi bani hoti, isliye standalone
+        # activity.send_alert() use karte hain.
+        try:
+            _emp = (lic.validate_key(lic.load_active_key(), check_url=False)
+                    .get("employee") or "unknown")
+        except Exception:
+            _emp = "unknown"
+
+        def _tamper_alert(msg: str) -> None:
+            try:
+                import activity
+                # sync=True: process abhi thodi der mein restart/exit hone
+                # wala hai — background thread poori bhejne se pehle hi
+                # process mar sakta hai, isliye yahan wait karke bhejo.
+                activity.send_alert(_emp, msg, sync=True)
+            except Exception:
+                pass
+
+        if updater.check_and_apply(getattr(lic, "UPDATE_URL", ""), APP_DIR,
+                                    alert=_tamper_alert):
+            # os.execl Windows par tootta hai jab python.exe ke path mein
+            # space ho (jaise "C:\Program Files\..."). subprocess.Popen
+            # argv ko list ke roop mein leta hai — koi shell-quoting issue nahi.
+            import subprocess
+            subprocess.Popen([sys.executable] + sys.argv, cwd=APP_DIR,
+                             close_fds=True)
+            sys.exit(0)
+    except SystemExit:
+        raise
     except Exception:
         pass
     print(f"[build] running build v{_build_no()}")

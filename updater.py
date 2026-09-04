@@ -49,10 +49,17 @@ def _get(url: str, timeout: int = 20) -> bytes:
         return r.read()
 
 
-def check_and_apply(update_url: str, base_dir: str, log=print) -> bool:
+def check_and_apply(update_url: str, base_dir: str, log=print, alert=None) -> bool:
     """
-    Return True agar files update hui (caller ko chahiye ke bot restart kare).
-    Net na ho / URL galat ho / manifest signature fail -> chup-chaap False.
+    Return True agar files update hui / heal hui (caller ko chahiye ke bot
+    restart kare). Net na ho / URL galat ho / manifest signature fail ->
+    chup-chaap False.
+
+    alert: optional callable(text) — agar SAME (ya purane) version par bhi
+    kisi protected file ka hash manifest se match nahi karta, matlab koi
+    update nahi hua tha lekin file phir bhi badli hui hai -> file MANUALLY
+    EDIT/TAMPER hui hai. Aisa case original se heal kiya jata hai aur
+    `alert()` ko turant call kiya jata hai (Discord alert ke liye).
     """
     update_url = (update_url or "").strip().rstrip("/")
     if not update_url:
@@ -62,20 +69,6 @@ def check_and_apply(update_url: str, base_dir: str, log=print) -> bool:
         man = json.loads(_get(update_url + "/manifest.json", timeout=12).decode("utf-8"))
     except Exception:
         return False   # no net / no manifest — normal chalo
-
-    ver = str(man.get("version", ""))
-    verfile = os.path.join(base_dir, ".update_ver")
-    try:
-        local_ver = open(verfile, encoding="utf-8").read().strip()
-    except Exception:
-        local_ver = ""
-    # Sirf tab update jab GitHub ka version LOCAL se BARA ho (downgrade nahi)
-    try:
-        if int(ver) <= int(local_ver or 0):
-            return False
-    except Exception:
-        if ver and ver == local_ver:
-            return False
 
     files = man.get("files", {})   # {name: sha256}
 
@@ -91,15 +84,47 @@ def check_and_apply(update_url: str, base_dir: str, log=print) -> bool:
     except Exception:
         return False
 
+    ver = str(man.get("version", ""))
+    verfile = os.path.join(base_dir, ".update_ver")
+    try:
+        local_ver = open(verfile, encoding="utf-8").read().strip()
+    except Exception:
+        local_ver = ""
+    # GitHub ka version LOCAL se bara hai to normal update hai (download honi
+    # chahiye). Warna (same/purana version) hash-mismatch sirf tamper ho
+    # sakta hai — dono cases mein neeche hash-diff nikaalte hain, farak sirf
+    # itna hai ke tamper-case mein alert bhi bhejna hai.
+    is_newer = False
+    try:
+        is_newer = int(ver) > int(local_ver or 0)
+    except Exception:
+        is_newer = bool(ver) and ver != local_ver
+
     to_get = [(n, s) for n, s in files.items()
               if n in UPDATABLE and _sha(os.path.join(base_dir, n)) != s]
 
     if not to_get:
-        try:
-            open(verfile, "w", encoding="utf-8").write(ver)   # loop se bacho
-        except Exception:
-            pass
+        if not local_ver and ver:
+            try:
+                open(verfile, "w", encoding="utf-8").write(ver)   # loop se bacho
+            except Exception:
+                pass
         return False
+
+    if not is_newer:
+        # Version GitHub jaisa (ya us se bara) hai, phir bhi hash farak hai —
+        # koi normal update nahi hua tha, matlab file(s) manually badli gayi
+        # hain. Turant alert + original files se heal (restore) karo.
+        names = ", ".join(n for n, _ in to_get)
+        msg = (f"FILE TAMPERING DETECTED on this PC: {names} "
+               f"was/were modified outside the update system. "
+               f"Restoring original file(s) automatically.")
+        log(f"   [SECURITY] {msg}")
+        if alert:
+            try:
+                alert(msg)
+            except Exception:
+                pass
 
     log(f"   [update] v{ver}: downloading {len(to_get)} file(s)...")
     staged = []
@@ -130,5 +155,8 @@ def check_and_apply(update_url: str, base_dir: str, log=print) -> bool:
         open(verfile, "w", encoding="utf-8").write(ver)
     except Exception:
         pass
-    log(f"   [update] applied {len(staged)} file(s) -> v{ver}. Restarting...")
+    if is_newer:
+        log(f"   [update] applied {len(staged)} file(s) -> v{ver}. Restarting...")
+    else:
+        log(f"   [security] restored {len(staged)} file(s) to verified originals. Restarting...")
     return True
