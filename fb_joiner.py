@@ -486,12 +486,20 @@ def _gemini_sync(question, city):
         send_ui("log", text=f"⛔ All {n} Gemini API key(s) failing/rate-limited "
                              f"— stopping bot (AI answers required, no fallback).")
         _GEMINI_DEAD_REASON = "gemini_keys_failed"
+        _dmsg = (f"⚠️ GEMINI API KEYS DOWN — saari {n} key(s) rate-limited/error "
+                 f"ho gayi hain. Bot ROK diya gaya hai. Naye/extra Gemini keys "
+                 f"chahiye ya thodi der baad dobara START karo.")
+        _sent = False
         if _ACT:
             try:
-                _ACT.alert(f"⚠️ GEMINI API KEYS DOWN — saari {n} key(s) "
-                           f"rate-limited/error ho gayi hain. Bot ROK diya "
-                           f"gaya hai. Naye/extra Gemini keys chahiye ya "
-                           f"thodi der baad dobara START karo.")
+                _ACT.alert(_dmsg)
+                _sent = True
+            except Exception:
+                pass
+        if not _sent:      # _ACT na ho to bhi Discord pe reason zaroor jaye
+            try:
+                import activity
+                activity.send_alert("bot", _dmsg)
             except Exception:
                 pass
         stop_event.set()
@@ -2400,29 +2408,95 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
 _STEALTH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
 
+# Init script har page/frame par chalta hai FB ka apna JS chalne se PEHLE.
+# Ye woh saare "ye ek automated / server browser hai" wale signals chhupata
+# hai jinki wajah se FB login ke baad captcha/checkpoint deta hai:
+#   - navigator.webdriver
+#   - plugins / mimeTypes khaali hona
+#   - window.chrome object missing
+#   - WebGL vendor/renderer "SwiftShader" / "Google Inc." (VPS bina GPU ka
+#     tell-tale sign — asli Intel GPU jaisa bana dete hain)
+#   - hardwareConcurrency / deviceMemory bahut kam (VPS = 1-2 core) —
+#     asli PC jaise 8 kar dete hain
+#   - permissions.query mismatch
 _STEALTH_INIT_JS = """
-() => {
+(() => {
+  try {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5].map(() => ({ name: 'Chrome PDF Plugin' }))
-    });
+  } catch (e) {}
+  try {
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    if (!window.chrome) { window.chrome = { runtime: {} }; }
-    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+  } catch (e) {}
+  try {
+    const mk = (name, filename, desc) => {
+      const p = { name, filename, description: desc, length: 1 };
+      p[0] = { type: 'application/pdf', suffixes: 'pdf', description: desc };
+      return p;
+    };
+    const arr = [
+      mk('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      mk('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      mk('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      mk('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      mk('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format'),
+    ];
+    Object.defineProperty(navigator, 'plugins', { get: () => arr });
+    Object.defineProperty(navigator, 'mimeTypes', {
+      get: () => [{ type: 'application/pdf', suffixes: 'pdf', description: '' }]
+    });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+  } catch (e) {}
+  try {
+    if (!window.chrome) { window.chrome = {}; }
+    if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+    if (!window.chrome.app) { window.chrome.app = { isInstalled: false }; }
+  } catch (e) {}
+  try {
+    const origQuery = window.navigator.permissions &&
+                      window.navigator.permissions.query;
     if (origQuery) {
-        window.navigator.permissions.query = (params) => (
-            params && params.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
-                : origQuery(params)
-        );
+      window.navigator.permissions.query = (params) => (
+        params && params.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : origQuery(params)
+      );
     }
-}
+  } catch (e) {}
+  // WebGL vendor/renderer -> asli Intel GPU jaisa (VPS software-renderer chhupao)
+  try {
+    const spoof = (proto) => {
+      const gp = proto.getParameter;
+      proto.getParameter = function (p) {
+        if (p === 37445) return 'Intel Inc.';                 // UNMASKED_VENDOR_WEBGL
+        if (p === 37446) return 'Intel Iris OpenGL Engine';   // UNMASKED_RENDERER_WEBGL
+        return gp.apply(this, [p]);
+      };
+    };
+    if (window.WebGLRenderingContext)  spoof(WebGLRenderingContext.prototype);
+    if (window.WebGL2RenderingContext) spoof(WebGL2RenderingContext.prototype);
+  } catch (e) {}
+})();
 """
 
 
 async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
-    """Persistent-context browser — automation-fingerprint kam karke."""
-    args = ["--disable-blink-features=AutomationControlled", "--disable-notifications"]
+    """Persistent-context browser — automation/VPS fingerprint chhupa ke."""
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-notifications",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-features=IsolateOrigins,site-per-process",
+    ]
     if extra_args:
         args += extra_args
     kwargs = dict(
@@ -2432,6 +2506,9 @@ async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
         ignore_default_args=["--enable-automation"],
         user_agent=_STEALTH_UA,
         locale="en-US",
+        timezone_id="America/Chicago",   # US timezone — JS clock US location se match kare
+        color_scheme="light",
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
     )
     if viewport is not None:
         kwargs["viewport"] = viewport
@@ -2440,72 +2517,21 @@ async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
         await ctx.add_init_script(_STEALTH_INIT_JS)
     except Exception:
         pass
+    # persistent-context ka pehla (about:blank) page init-script add karne se
+    # PEHLE ban chuka hota hai — us par stealth patch nahi lagta. Isliye ek
+    # fresh page kholo (usi par init-script chalega) aur purana band kar do,
+    # taake callers ka ctx.pages[0] patched page ho.
+    try:
+        old_pages = list(ctx.pages)
+        await ctx.new_page()
+        for pg in old_pages:
+            try:
+                await pg.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
     return ctx
-
-
-def _load_cookie_file(path: str) -> list:
-    """
-    fb_cookies.json ko Playwright cookie-format mein convert karo. Format:
-    "Cookie-Editor" / "EditThisCookie" jaisi Chrome extensions ka JSON
-    export (list of {name, value, domain, path, expirationDate, ...}) —
-    employee apne trusted phone/PC (jahan FB pehle se logged-in/trusted
-    hai) se export karke ye file bot folder mein rakh sakta hai. Isse
-    bot fresh login KABHI nahi karta — seedha trusted session use karta
-    hai, jo VPS ki naye-device login jaisa risk trigger nahi karta.
-    """
-    try:
-        raw = json.load(open(path, encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(raw, list):
-        return []
-    ss_map = {"no_restriction": "None", "lax": "Lax", "strict": "Strict",
-              "unspecified": "Lax", "none": "None"}
-    out = []
-    for c in raw:
-        try:
-            name = c.get("name")
-            value = c.get("value")
-            domain = c.get("domain", "")
-            if not name or value is None or not domain:
-                continue
-            item = {
-                "name": name, "value": value,
-                "domain": domain, "path": c.get("path") or "/",
-                "httpOnly": bool(c.get("httpOnly", False)),
-                "secure": bool(c.get("secure", True)),
-            }
-            exp = c.get("expirationDate") or c.get("expires")
-            if exp:
-                try:
-                    item["expires"] = float(exp)
-                except Exception:
-                    pass
-            ss = str(c.get("sameSite", "")).strip().lower()
-            if ss:
-                item["sameSite"] = ss_map.get(ss, "Lax")
-            out.append(item)
-        except Exception:
-            continue
-    return out
-
-
-async def _import_cookies(ctx) -> int:
-    """fb_cookies{SUFFIX}.json (agar bot folder mein hai) load karo — har
-    profile/account ki apni alag file (fb_cookies.json = account 1,
-    fb_cookies_2.json = account 2, wagera — pw_profile ki tarah). Return:
-    kitni cookies import hui (0 = file nahi hai ya khaali)."""
-    path = os.path.join(APP_DIR, f"fb_cookies{SUFFIX}.json")
-    if not os.path.exists(path):
-        return 0
-    cookies = _load_cookie_file(path)
-    if not cookies:
-        return 0
-    try:
-        await ctx.add_cookies(cookies)
-        return len(cookies)
-    except Exception:
-        return 0
 
 
 # ── Playwright Main ───────────────────────────────────────────
@@ -2521,11 +2547,6 @@ async def playwright_main(config):
         send_ui("log", text="🌐 Launching browser...")
         ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
                                extra_args=["--start-maximized"])
-
-        n_ck = await _import_cookies(ctx)
-        if n_ck:
-            send_ui("log", text=f"🍪 Loaded {n_ck} saved cookies (trusted session, "
-                                f"no fresh login needed)")
 
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         send_ui("log", text="📘 Opening Facebook...")
@@ -2600,10 +2621,11 @@ async def playwright_main(config):
                     except Exception:
                         pass
 
-                # Har ~10 cycle (~20 min): file-tamper check bhi, taake chal
-                # rahe session ke beech koi file edit/crack na kar sake bina
-                # turant Discord alert liye. Blocking network call hai —
-                # thread mein chalao taake join-loop na ruke.
+                # Har ~10 cycle (~20 min): SIRF file-tamper check (koi version
+                # update mid-session NAHI — warna chal rahi joining bina error
+                # ke silently ruk jaati thi). Sirf tab rukta hai jab koi file
+                # sach mein tamper hui ho — aur tab clear Discord alert bhi
+                # jata hai. Blocking network call hai — thread mein.
                 _integrity_ctr["n"] += 1
                 if _integrity_ctr["n"] % 10 == 0:
                     try:
@@ -2616,14 +2638,14 @@ async def playwright_main(config):
                                 except Exception:
                                     pass
 
-                        changed = await asyncio.to_thread(
-                            updater.check_and_apply,
+                        tampered = await asyncio.to_thread(
+                            updater.check_integrity_only,
                             getattr(lic, "UPDATE_URL", ""), APP_DIR,
                             print, _integrity_alert)
-                        if changed:
-                            send_ui("log", text="🔄 Files were updated/restored on disk — "
-                                                 "bot is stopping. Please restart it.")
-                            config["_end_reason"] = "files_updated"
+                        if tampered:
+                            send_ui("log", text=f"🚨 File tampering detected ({', '.join(tampered)}) "
+                                                 f"— bot is stopping. Restart to reload verified files.")
+                            config["_end_reason"] = "file_tamper"
                             stop_event.set()
                             return
                     except Exception:
@@ -2717,7 +2739,7 @@ async def playwright_main(config):
             config["_end_reason"] = _GEMINI_DEAD_REASON
         elif config.get("_end_reason") not in ("license_expired", "account_blocked",
                                                 "pending_limit", "setup_failed",
-                                                "files_updated"):
+                                                "file_tamper"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         send_ui("log", text=f"\n🎉 Done! This session: joined {joined_today} groups, skipped {skipped_today}.")
@@ -2732,9 +2754,6 @@ async def _login_browser_main():
         send_ui("log", text="🌐 Browser khul raha hai — Facebook pe login karo…")
         ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
                                extra_args=["--start-maximized"])
-        n_ck = await _import_cookies(ctx)
-        if n_ck:
-            send_ui("log", text=f"🍪 Loaded {n_ck} saved cookies (trusted session)")
         closed = {"v": False}
         ctx.on("close", lambda *a: closed.__setitem__("v", True))
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
@@ -2823,57 +2842,6 @@ def run_logout_browser():
     except Exception as e:
         send_ui("log", text=f"logout error: {str(e)[:80]}")
         send_ui("logout_done")
-
-
-async def _load_cookies_main(src_path: str):
-    """
-    User ne "Load cookies" se chuni hui JSON file ko:
-      1. fb_cookies{SUFFIX}.json (is profile ki apni file) mein save karo
-      2. TURANT ek headless browser (isi profile) mein inject bhi kar do —
-         taake abhi ke abhi pata chal jaye kitni cookies li (0 = file ka
-         format galat ya khaali — turant pata chal jaye, agli baar START
-         karte waqt chup-chaap fail na ho).
-    """
-    dst = os.path.join(APP_DIR, f"fb_cookies{SUFFIX}.json")
-    try:
-        raw = json.load(open(src_path, encoding="utf-8"))
-        if not isinstance(raw, list) or not raw:
-            send_ui("log", text="❌ Ye file cookies ki list nahi lag rahi — "
-                                "Cookie-Editor se 'Export as JSON' use karo.")
-            send_ui("cookies_done", count=-1)
-            return
-        with open(dst, "w", encoding="utf-8") as f:
-            json.dump(raw, f)
-    except Exception as e:
-        send_ui("log", text=f"❌ File padhne mein masla: {str(e)[:80]}")
-        send_ui("cookies_done", count=-1)
-        return
-
-    send_ui("log", text="🍪 Cookies save ho gayi — abhi test kar rahe hain…")
-    n = 0
-    try:
-        async with async_playwright() as p:
-            ctx = await _launch_ctx(p, headless=True)
-            n = await _import_cookies(ctx)
-            await ctx.close()
-    except Exception as e:
-        send_ui("log", text=f"cookie load error: {str(e)[:80]}")
-
-    if n:
-        send_ui("log", text=f"✅ {n} cookies load ho gayi is profile mein — "
-                            f"ab START pe fresh login nahi hoga.")
-    else:
-        send_ui("log", text="⚠️ File mein se koi valid cookie nahi mili — "
-                            "shayad format match nahi hua. Dobara export try karo.")
-    send_ui("cookies_done", count=n)
-
-
-def run_load_cookies(src_path: str):
-    try:
-        asyncio.run(_load_cookies_main(src_path))
-    except Exception as e:
-        send_ui("log", text=f"cookie load error: {str(e)[:80]}")
-        send_ui("cookies_done", count=-1)
 
 
 def run_playwright(config):
@@ -2981,7 +2949,6 @@ class App:
         self.running        = False
         self._login_open    = False
         self._logout_open   = False
-        self._cookies_open  = False
         self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
 
         self._style()
@@ -3058,6 +3025,18 @@ class App:
         s = load_settings()
         s["gemini_keys"] = resolve_gemini_keys(self._gemini_box_text())
         save_settings(s)
+
+    def _persist_simple(self):
+        """Page link + area turant save — har profile (account) ka apna
+        alag, taake dobara khulne par bhare rahein aur ek doosre ko
+        overwrite na karein."""
+        try:
+            s = load_settings()
+            s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
+            s[f"city{SUFFIX}"] = self.city_var.get().strip()
+            save_settings(s)
+        except Exception:
+            pass
 
     def _test_gemini(self):
         keys = resolve_gemini_keys(self._gemini_box_text())
@@ -3393,12 +3372,6 @@ class App:
                                    activebackground=BORDER, activeforeground=TXT,
                                    command=self._open_login, pady=6)
         self.login_btn.pack(side="left", fill="x", expand=True)
-        self.load_cookies_btn = tk.Button(acct_row, text="🍪  Load cookies",
-                                          bg=INPUT_BG, fg=TXT_MUTED, font=("Segoe UI", 9),
-                                          relief="flat", cursor="hand2",
-                                          activebackground=BORDER, activeforeground=TXT,
-                                          command=self._do_load_cookies, pady=6)
-        self.load_cookies_btn.pack(side="left", padx=(6, 0))
 
         _sc = tk.Frame(left, bg=BG)
         _sc.pack(side="top", fill="both", expand=True)
@@ -3424,7 +3397,10 @@ class App:
         self._section_title(card, "SETTINGS")
 
         self._label(card, "Area")
-        self.city_var = tk.StringVar(value=ALL_AREAS_LABEL)
+        _s0 = load_settings()
+
+        self.city_var = tk.StringVar(
+            value=_s0.get(f"city{SUFFIX}") or _s0.get("city") or ALL_AREAS_LABEL)
         area_values = [ALL_AREAS_LABEL] + AREAS
         area_combo = ttk.Combobox(card, textvariable=self.city_var,
                                    values=area_values, font=("Segoe UI", 10),
@@ -3432,8 +3408,12 @@ class App:
         area_combo.pack(fill="x", pady=(2, 10), ipady=3)
 
         self._label(card, "Page Link (your Facebook page URL)")
-        self.page_link_var = tk.StringVar(value=DEFAULT_PAGE_LINK)
+        self.page_link_var = tk.StringVar(
+            value=_s0.get(f"page_link{SUFFIX}") or _s0.get("page_link") or DEFAULT_PAGE_LINK)
         self._entry(card, self.page_link_var, pady=(2, 10))
+        # Page link + area badalte hi turant save — baar-baar paste na karna pade
+        self.page_link_var.trace_add("write", lambda *a: self._persist_simple())
+        self.city_var.trace_add("write", lambda *a: self._persist_simple())
 
         row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
         col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 5))
@@ -3458,8 +3438,6 @@ class App:
         self._label(col4, "Delay Max (sec)")
         self.delay_max_var = tk.IntVar(value=12)
         self._entry(col4, self.delay_max_var, pady=(2, 4))
-
-        _s0 = load_settings()
 
         # ── Public / Private target mix ──
         row3 = tk.Frame(card, bg=CARD_BG); row3.pack(fill="x", pady=(8, 0))
@@ -3617,27 +3595,8 @@ class App:
         setattr(self, f"{name}_var", v)
         return v
 
-    def _do_load_cookies(self):
-        if self.running or getattr(self, "_login_open", False) or \
-                getattr(self, "_logout_open", False) or \
-                getattr(self, "_cookies_open", False):
-            return
-        path = filedialog.askopenfilename(
-            title="Cookie-Editor se export ki hui JSON file chuno",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
-        if not path:
-            return
-        self._cookies_open = True
-        self.load_cookies_btn.config(text="🍪  Loading…", state="disabled")
-        self.login_btn.config(state="disabled")
-        self.logout_btn.config(state="disabled")
-        self.btn.config(state="disabled")
-        self.status_var.set("●  Loading cookies…")
-        threading.Thread(target=run_load_cookies, args=(path,), daemon=True).start()
-
     def _open_login(self):
-        if self.running or getattr(self, "_logout_open", False) or \
-                getattr(self, "_cookies_open", False):
+        if self.running or getattr(self, "_logout_open", False):
             return
         if getattr(self, "_login_open", False):
             # dobara dabaya -> login browser band karo
@@ -3649,14 +3608,12 @@ class App:
         self.login_btn.config(text="🌐  Browser open — log in, then click here / close it")
         self.btn.config(state="disabled")
         self.logout_btn.config(state="disabled")
-        self.load_cookies_btn.config(state="disabled")
         self.status_var.set("●  Login browser open…")
         threading.Thread(target=run_login_browser, daemon=True).start()
 
     def _do_logout(self):
         if self.running or getattr(self, "_login_open", False) or \
-                getattr(self, "_logout_open", False) or \
-                getattr(self, "_cookies_open", False):
+                getattr(self, "_logout_open", False):
             return
         if not messagebox.askyesno(
                 "Log out of Facebook",
@@ -3668,7 +3625,6 @@ class App:
         self._logout_open = True
         self.logout_btn.config(text="🚪  Logging out…", state="disabled")
         self.login_btn.config(state="disabled")
-        self.load_cookies_btn.config(state="disabled")
         self.btn.config(state="disabled")
         self.status_var.set("●  Logging out of Facebook…")
         threading.Thread(target=run_logout_browser, daemon=True).start()
@@ -3687,10 +3643,6 @@ class App:
             if getattr(self, "_logout_open", False):
                 messagebox.showinfo("Logging out",
                                     "Logout khatam hone ka intezaar karo, phir START.")
-                return
-            if getattr(self, "_cookies_open", False):
-                messagebox.showinfo("Loading cookies",
-                                    "Cookies load hone ka intezaar karo, phir START.")
                 return
             # ── License check — no START without a valid key ──
             info = lic.validate_key(lic.load_active_key())
@@ -3721,7 +3673,6 @@ class App:
             self.btn.config(text="⏹   STOP", bg=RED)
             self.login_btn.config(state="disabled")
             self.logout_btn.config(state="disabled")
-            self.load_cookies_btn.config(state="disabled")
             self.status_var.set("●  Running...")
             config = {
                 "city":        city,
@@ -3744,6 +3695,8 @@ class App:
             }
             self._persist_gemini()          # remember keys for next time
             s = load_settings()
+            s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
+            s[f"city{SUFFIX}"] = self.city_var.get().strip()
             s["public_pct"] = self._public_pct()
             s["skip_no_post"] = bool(self.skip_nopost_var.get())
             s["same_state_only"] = bool(self.same_state_var.get())
@@ -3794,26 +3747,13 @@ class App:
                     self.login_btn.config(
                         text="🔓  Open browser & log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
-                    self.load_cookies_btn.config(state="normal")
                     self.status_var.set("●  Login done — press START")
                     self._refresh_license_ui()
                 elif t == "logout_done":
                     self._logout_open = False
                     self.logout_btn.config(text="🚪  Log out", state="normal")
                     self.login_btn.config(state="normal")
-                    self.load_cookies_btn.config(state="normal")
                     self.status_var.set("●  Logged out — press 'Open browser & log in' to sign in again")
-                    self._refresh_license_ui()
-                elif t == "cookies_done":
-                    self._cookies_open = False
-                    self.load_cookies_btn.config(text="🍪  Load cookies", state="normal")
-                    self.login_btn.config(state="normal")
-                    self.logout_btn.config(state="normal")
-                    n = msg.get("count", 0)
-                    self.status_var.set(
-                        "●  Cookies loaded — press START" if n > 0 else
-                        "●  Cookie load failed — check the file" if n < 0 else
-                        "●  No cookies found in that file")
                     self._refresh_license_ui()
                 elif t == "stopped":
                     self.running = False
@@ -3822,7 +3762,6 @@ class App:
                     self.login_btn.config(
                         text="🔓  Open browser & log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
-                    self.load_cookies_btn.config(state="normal")
                     self.status_var.set("●  Idle — press START to begin")
                     self.now_target_var.set("Search: —")
                     self._log(f"📊 This session: {self.joined_today} joined | {self.skipped_today} skipped")

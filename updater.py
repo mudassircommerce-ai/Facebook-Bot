@@ -29,9 +29,8 @@ UPDATABLE = {
     "fb_joiner.py", "license_common.py", "activity.py", "updater.py",
     "areas.py", "areas_cache.json", "logout_account.py",
     "block_keywords.txt", "EMPLOYEE_SETUP.txt", "READ_ME_FIRST.txt",
-    "README.txt",
-    "START.bat", "START_2.bat", "START_3.bat", "START_4.bat", "START_5.bat",
-}
+    "README.txt", "START.bat",
+} | {f"START_{n}.bat" for n in range(2, 21)}   # 20 profiles ki capacity
 
 
 def _sha(path: str) -> str:
@@ -160,3 +159,80 @@ def check_and_apply(update_url: str, base_dir: str, log=print, alert=None) -> bo
     else:
         log(f"   [security] restored {len(staged)} file(s) to verified originals. Restarting...")
     return True
+
+
+def check_integrity_only(update_url: str, base_dir: str, log=print, alert=None,
+                         heal: bool = True) -> list:
+    """
+    SIRF file-tamper check — koi version update NAHI.
+
+    Chalta hai tabhi jab GitHub manifest ka version EXACTLY local
+    .update_ver jaisa ho (matlab hum jaante hain ke is version par har
+    file ka sahi hash kya hona chahiye). Us surat mein agar kisi protected
+    file ka hash farak hai -> file manually edit/tamper hui hai:
+      - alert(text) call hota hai (Discord)
+      - heal=True ho to sirf woh file(s) original se restore ho jaati hain
+      - tampered filenames ki list return hoti hai
+
+    Version match na kare (GitHub naya ya purana) -> [] (khaali). Ye
+    "naya version aa gaya" wala case yahan bilkul handle nahi hota — woh
+    sirf startup par _self_update() dekhta hai, taake chal rahi joining
+    beech-session update ki wajah se kabhi silently na ruke.
+    """
+    update_url = (update_url or "").strip().rstrip("/")
+    if not update_url:
+        return []
+    try:
+        man = json.loads(_get(update_url + "/manifest.json", timeout=12).decode("utf-8"))
+    except Exception:
+        return []
+
+    files = man.get("files", {})
+    try:
+        import license_common as lic
+        body = json.dumps(files, separators=(",", ":"), sort_keys=True)
+        if not lic._verify(lic._b64u(body.encode()), man.get("sig", ""),
+                           lic.LICENSE_PUBKEY_N, lic.LICENSE_PUBKEY_E):
+            return []
+    except Exception:
+        return []
+
+    ver = str(man.get("version", ""))
+    verfile = os.path.join(base_dir, ".update_ver")
+    try:
+        local_ver = open(verfile, encoding="utf-8").read().strip()
+    except Exception:
+        local_ver = ""
+    if not ver or ver != local_ver:
+        return []   # version match nahi -> tamper-check ka scope nahi
+
+    bad = [(n, s) for n, s in files.items()
+           if n in UPDATABLE
+           and os.path.exists(os.path.join(base_dir, n))
+           and _sha(os.path.join(base_dir, n)) != s]
+    if not bad:
+        return []
+
+    names = ", ".join(n for n, _ in bad)
+    msg = (f"FILE TAMPERING DETECTED on this PC: {names} "
+           f"was/were modified outside the update system.")
+    log(f"   [SECURITY] {msg}")
+    if alert:
+        try:
+            alert(msg)
+        except Exception:
+            pass
+
+    if heal:
+        for name, want in bad:
+            try:
+                data = _get(update_url + "/" + name, timeout=40)
+                if hashlib.sha256(data).hexdigest() == want:
+                    tmp = os.path.join(base_dir, name + ".new")
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    os.replace(tmp, os.path.join(base_dir, name))
+            except Exception:
+                pass
+
+    return [n for n, _ in bad]
