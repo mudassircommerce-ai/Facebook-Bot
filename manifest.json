@@ -1,5 +1,5 @@
 {
- "version": 39,
+ "version": 43,
  "files": {
   "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
   "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
@@ -23,13 +23,13 @@
   "START_7.bat": "61d2a710033e42710e278d939f960aaeb3b712d4a96857c3d8c053ea42dc6e06",
   "START_8.bat": "139cab9b34a49aad22591b6ae2702772b9225aa3e17c5edf35fe08cb3281adf6",
   "START_9.bat": "08f892b9cd8ab3fcd2c77e206b0cecc51d0c3da42fafb77ef1de25267fc9c164",
-  "activity.py": "31dabd6a8fb5e5a7eb7729d14e26a84ed2d73d350c8abdec02ea1a122b33c80f",
+  "activity.py": "bd06f569c519f53aad7c328ba043abd7eb9501d4f0ed08e5aecc75f55cd6ca2b",
   "areas.py": "ed2a1eaa516dd3741ae41b0f6017710a4e2ce2c038e1287c4b66c757e44f03b0",
   "areas_cache.json": "5045780201dd96ac556055645c111ed416f331397ae80f711b29a75210c0a03a",
-  "fb_joiner.py": "ab1d5175f5b8cdee3d973934acd9bff0c1a869cf3cc8cb1cd0eff18c23c866f1",
+  "fb_joiner.py": "6e3119e413d6636666b4add5fe9501756daa3fa3bdb35d1ecf4c89e1be64428e",
   "license_common.py": "5d147f68abcd8d2bf745e35f368eb9e04c4d0be9ccc150708c78246bbdf50e6b",
   "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
-  "updater.py": "87dd4afcb9387b28c9b6488a382cb20e7e0221cd78a307f00e530b0916389f23"
+  "updater.py": "b3b1bbf95b30fe952a9623bd77be387ae61bba3e6658d028641d55ac778789ad"
  },
- "sig": "E5t9fap1OVouc4v3aTJdD2sG4uu4B5FXuh7pI1Q3Ch4jfCUAUS6bruc2IWI5eeAFeFso71FDRZECtcvunmqoWfXa4W7rQWGKB4msabhg89LLVgK_6qx2HZjAaHA-qxL0BIU-o6iPQNP3Ecd-p4DNaj6EldOAhRMMLD5N_RW4Ck9hITLABekFN-__6iY0Iv_hfo-UajWvXh6BPh8x217owxjoSpl6bIWtoQB2QGpzmkZjzNqI9xBvARDbH5JxETPAXasMjrQwucavBhZC8wSTH_9SGU3TgWewEggQpGPge-rLQxStC7SH6JJOthvWPx_ZmusGG5s4RfItuBzIGNRJ5g"
+ "sig": "EyVPKue6ybKcyrKLVLJvxAQLEJMwWW0hG-KuuS_lfqFMAQqNIH77egDNVPvlmR_A5ilNl9IKl0hU2Mufez9Iu5hA4WE2GMRLmH8Dlb9AKUAPylOvsFmq16Q0813VJimYCr6R51a4PtPNbympQXHE1ms1qp0t0v1Xv0Be1Rl2P-rQszf1sBF081giG4LNCZ_Oh2OVC66osCka6aI8THqgvGzs4Gp4Daw1rX_cvwRczwbi8NXTfpZjl5Y5HSnWqkf8aWS0bujX18-Hgylj_Mwhb2Du6FR_q76_rjNY8L4KNod7Uo2-paA8chZdmsDyK0c00OPjlS-jIE_fFyjKTbEU1A"
 }

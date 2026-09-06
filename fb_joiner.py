@@ -46,6 +46,11 @@ LICENSE_RECHECK_SEC = 120
 INSTANCE = sys.argv[1] if len(sys.argv) > 1 else "1"
 SUFFIX   = "" if INSTANCE == "1" else f"_{INSTANCE}"
 
+# Human-facing version (UI mein dikhta hai). Andar ka auto-update abhi bhi
+# .update_ver ke monotonic integer (41, 42, …) se chalta hai — usse chhedo
+# mat, warna downgrade-protection toot jayegi.
+APP_VERSION = "4.1"
+
 # ── App folder ───────────────────────────────────────────────
 # Sab files (browser profile, logs, screenshots, area cache) is folder
 # ke andar rehti hain — dev mein script ka folder, packaged .exe mein
@@ -739,6 +744,107 @@ def send_ui(msg_type, **kwargs):
 
 async def sleep(sec):
     await asyncio.sleep(sec)
+
+
+async def _sleep_interruptible(secs, chunk=5):
+    """Lambi wait (break / off-hours) — stop_event set hote hi turant wapas."""
+    end = time.time() + max(0.0, secs)
+    while time.time() < end and not stop_event.is_set():
+        await asyncio.sleep(min(chunk, max(0.2, end - time.time())))
+
+
+def _parse_hhmm(s, default_min):
+    try:
+        h, m = str(s).strip().split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h * 60 + m
+    except Exception:
+        pass
+    return default_min
+
+
+def _fmt_hhmm(mins):
+    return f"{(mins // 60) % 24:02d}:{mins % 60:02d}"
+
+
+class HumanPacer:
+    """
+    Din ke joins ko phaila deta hai (bina-ruke burst nahi), working-hours ke
+    bahar ruk jata hai, aur beech mein 'natural break' leta hai — pattern
+    insani lage aur account safe rahe.
+    """
+
+    def __init__(self, config):
+        self.on        = bool(config.get("pace_enabled", True))
+        self.limit     = int(config.get("daily_limit", 250) or 250)
+        self.win_start = _parse_hhmm(config.get("work_start", "09:00"), 9 * 60)
+        self.win_end   = _parse_hhmm(config.get("work_end", "21:00"), 21 * 60)
+        self.n_session = 0
+        self.since_brk = 0
+        self.brk_at    = random.randint(18, 32)
+
+    def _now_min(self):
+        t = datetime.now()
+        return t.hour * 60 + t.minute
+
+    def _in_window(self):
+        if self.win_start == self.win_end:
+            return True
+        n = self._now_min()
+        if self.win_start < self.win_end:
+            return self.win_start <= n < self.win_end
+        return n >= self.win_start or n < self.win_end       # overnight
+
+    def _secs_left_in_window(self):
+        if self.win_start == self.win_end:
+            return 12 * 3600
+        n = self._now_min()
+        if self.win_start < self.win_end:
+            return max(60, (self.win_end - n) * 60)
+        if n >= self.win_start:
+            return max(60, (24 * 60 - n + self.win_end) * 60)
+        return max(60, (self.win_end - n) * 60)
+
+    async def wait_for_window(self):
+        if not self.on:
+            return
+        told = False
+        while self.on and not self._in_window() and not stop_event.is_set():
+            if not told:
+                send_ui("log", text=f"🕗 Working hours ({_fmt_hhmm(self.win_start)}"
+                                    f"–{_fmt_hhmm(self.win_end)}) ke bahar — "
+                                    f"window khulne ka intezaar…")
+                told = True
+            await _sleep_interruptible(180)
+        if told and not stop_event.is_set():
+            send_ui("log", text="🕘 Working hours shuru — joining resume.")
+
+    async def pace(self, joined_today):
+        """Ek successful join ke BAAD call karo."""
+        if not self.on:
+            await sleep(rand_delay(4, 9))
+            return
+        self.n_session += 1
+        self.since_brk += 1
+
+        if self.since_brk >= self.brk_at:
+            mins = random.randint(5, 15)
+            send_ui("log", text=f"☕ Natural break — {mins} min")
+            await _sleep_interruptible(mins * 60)
+            self.since_brk = 0
+            self.brk_at    = random.randint(20, 38)
+            if stop_event.is_set():
+                return
+
+        remaining = max(1, self.limit - joined_today)
+        gap = self._secs_left_in_window() / remaining
+        gap = max(25.0, min(300.0, gap)) * random.uniform(0.7, 1.35)
+        if self.n_session <= 15:                    # dheema start
+            gap *= random.uniform(1.6, 2.4)
+        send_ui("log", text=f"   ⏳ {gap:.0f}s wait (paced)")
+        await _sleep_interruptible(gap)
+
 
 async def human_type(el, text):
     """React-compatible typing"""
@@ -2259,7 +2365,7 @@ async def join_one_group(page, url, name, area, config):
         log_csv(area, name, url, "error")
         return "skipped"
 
-async def search_and_join(page, city, already_joined, config, joined_today=0):
+async def search_and_join(page, city, already_joined, config, joined_today=0, pacer=None):
     global CURRENT_CITY
     CURRENT_CITY = city
     joined  = 0
@@ -2360,6 +2466,12 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
         if stop_event.is_set() or joined_today + joined >= limit:
             break
 
+        # Working-hours ke bahar ho to yahin ruk jao (window khulne tak)
+        if pacer is not None:
+            await pacer.wait_for_window()
+            if stop_event.is_set():
+                break
+
         name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
         status = await join_one_group(page, group_url, name, city, config)
 
@@ -2388,13 +2500,17 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
 
         # Delay strategy: Facebook sirf JOIN action ko sensitive samajhta
         # hai — group ka page dekhna aam browsing hai. Isliye join ke baad
-        # poora delay, skip ke baad chhota sa. Speed 3-4x barh jati hai.
+        # poora delay, skip ke baad chhota sa.
         if status == "joined":
-            wait = rand_delay(config["delay_min"], config["delay_max"])
+            if pacer is not None:
+                # Human pacing: din bhar phaila ke + breaks (account safe)
+                await pacer.pace(joined_today + joined)
+            else:
+                wait = rand_delay(config["delay_min"], config["delay_max"])
+                send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
+                await sleep(wait)
         else:
-            wait = rand_delay(1.5, 3.5)
-        send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
-        await sleep(wait)
+            await sleep(rand_delay(1.5, 3.5))
 
     return joined, skipped
 
@@ -2540,8 +2656,17 @@ async def playwright_main(config):
     already_joined = load_joined()
     total         = load_total()
     total_skipped = load_total_skipped()
-    joined_today  = 0
+    # joined_today PERSISTENT hai — agar aaj is profile ne pehle hi X group
+    # join kiye hain (restart / crash / PC reboot se pehle), to wahi se aage
+    # badhte hain, 0 se nahi. Daily limit bhi isi ke hisaab se lagta hai.
+    _act0 = config.get("_activity")
+    joined_today  = _act0.joined_today() if _act0 else 0
+    _session_start = joined_today          # is run ka apna count nikalne ke liye
     skipped_today = 0
+    if joined_today:
+        send_ui("log", text=f"↻ Aaj ab tak {joined_today} group join ho chuke — "
+                            f"wahin se continue (limit {config.get('daily_limit', 250)}).")
+        send_ui("joined", count=joined_today)
 
     async with async_playwright() as p:
         send_ui("log", text="🌐 Launching browser...")
@@ -2673,7 +2798,34 @@ async def playwright_main(config):
                     stop_event.set()
                     return
 
+                # Owner ka remote ON/OFF switch — chalte hue bhi rok sakta hai
+                try:
+                    import updater as _upd
+                    _sok, _smsg = _upd.service_allows(
+                        getattr(lic, "UPDATE_URL", ""), config.get("employee", ""))
+                except Exception:
+                    _sok, _smsg = True, ""
+                if not _sok:
+                    send_ui("log", text=f"⏸️  {_smsg} — bot ruk raha hai.")
+                    if act:
+                        try:
+                            act.alert(f"Bot admin-paused ({_smsg}) — stopped.")
+                        except Exception:
+                            pass
+                    config["_end_reason"] = "service_paused"
+                    stop_event.set()
+                    return
+
         wd_task = asyncio.create_task(_license_watchdog())
+
+        pacer = HumanPacer(config)
+        if pacer.on:
+            send_ui("log", text=f"🚶 Human pacing ON — joins din bhar phaile "
+                                f"({_fmt_hhmm(pacer.win_start)}–{_fmt_hhmm(pacer.win_end)}), "
+                                f"beech mein breaks. (Account safety)")
+        else:
+            send_ui("log", text="⚡ Human pacing OFF — fixed delays "
+                                f"({config.get('delay_min')}–{config.get('delay_max')}s).")
 
         selection = config["city"]
         limit     = config["daily_limit"]
@@ -2714,7 +2866,8 @@ async def playwright_main(config):
                 if stop_event.is_set() or joined_today >= limit:
                     break
                 config["_current_city"] = target
-                n_joined, n_skipped = await search_and_join(page, target, already_joined, config, joined_today)
+                n_joined, n_skipped = await search_and_join(
+                    page, target, already_joined, config, joined_today, pacer)
                 joined_today  += n_joined
                 skipped_today += n_skipped
                 total         += n_joined
@@ -2739,10 +2892,12 @@ async def playwright_main(config):
             config["_end_reason"] = _GEMINI_DEAD_REASON
         elif config.get("_end_reason") not in ("license_expired", "account_blocked",
                                                 "pending_limit", "setup_failed",
-                                                "file_tamper"):
+                                                "file_tamper", "service_paused"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
-        send_ui("log", text=f"\n🎉 Done! This session: joined {joined_today} groups, skipped {skipped_today}.")
+        _this_run = joined_today - _session_start
+        send_ui("log", text=f"\n🎉 Done! This run: joined {_this_run} groups, skipped {skipped_today}. "
+                            f"Aaj total: {joined_today}/{config.get('daily_limit', 250)}.")
         send_ui("log", text="✅ Session complete!")
         await ctx.close()
         send_ui("stopped")
@@ -2853,6 +3008,20 @@ def run_playwright(config):
         send_ui("stopped")
         return
 
+    # ── Owner ka remote ON/OFF switch (admin bina PC chhue rok/chalu kar sake) ──
+    try:
+        import updater as _upd
+        _sok, _smsg = _upd.service_allows(getattr(lic, "UPDATE_URL", ""),
+                                          config.get("employee", ""))
+    except Exception:
+        _sok, _smsg = True, ""
+    if not _sok:
+        send_ui("log", text=f"⏸️  {_smsg}")
+        send_ui("log", text="   Administrator ne is bot ko rok rakha hai — "
+                            "baad mein START karo (ya admin se poochho).")
+        send_ui("stopped")
+        return
+
     # ── Gemini AI answers (optional, key rotation) ──
     global GEMINI_KEYS, _gk_idx, _GEMINI_DEAD_REASON
     GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
@@ -2896,24 +3065,77 @@ def run_playwright(config):
     config["_activity"] = act
     config["_end_reason"] = "completed"
 
-    try:
-        asyncio.run(playwright_main(config))
-        act.end_session(config.get("_end_reason", "completed"))
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
+    # ── Auto-resume on crash ──────────────────────────────────
+    # Bot / browser beech mein crash ho jaye (ya browser window band ho
+    # jaye) to khud restart hota hai aur AAJ ke joins wahin se continue
+    # karta hai (joined_today persistent hai). User ne STOP dabaya ho ya
+    # koi terminal reason ho (license / block / gemini / tamper) to restart
+    # NAHI hota. Max 6 koshish, badhta hua wait.
+    MAX_RESTARTS = 6
+    _terminal = ("license_expired", "account_blocked", "pending_limit",
+                 "setup_failed", "file_tamper", "gemini_keys_failed",
+                 "service_paused")
+    restarts = 0
+    while True:
         try:
-            with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
-                ef.write(f"\n--- {datetime.now()} | FATAL (run_playwright) ---\n{tb}\n")
-        except:
-            pass
-        try:
-            act.end_session("error")
-        except Exception:
-            pass
-        send_ui("log", text=f"❌ Fatal error: {e}")
-        send_ui("log", text=f"   (Full details saved to error_log{SUFFIX}.txt)")
-        send_ui("stopped")
+            asyncio.run(playwright_main(config))
+            act.end_session(config.get("_end_reason", "completed"))
+            break                                   # normal / terminal finish
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+                    ef.write(f"\n--- {datetime.now()} | crash (run_playwright) ---\n{tb}\n")
+            except Exception:
+                pass
+            try:
+                act.end_session("error")
+            except Exception:
+                pass
+
+            # User ne STOP dabaya / terminal reason -> restart nahi
+            if stop_event.is_set() or config.get("_end_reason") in _terminal:
+                send_ui("log", text=f"❌ Error: {str(e)[:120]}")
+                send_ui("log", text=f"   (Details: error_log{SUFFIX}.txt)")
+                break
+
+            restarts += 1
+            if restarts > MAX_RESTARTS:
+                send_ui("log", text=f"❌ {MAX_RESTARTS} baar crash hua — ab ruk raha hoon. "
+                                    f"error_log{SUFFIX}.txt dekho / bot dobara START karo.")
+                try:
+                    _a = config.get("_activity")
+                    if _a:
+                        _a.alert(f"Bot {MAX_RESTARTS} baar crash hua aur restart fail — "
+                                 f"is profile ko manually START karna hoga.")
+                except Exception:
+                    pass
+                break
+
+            wait = min(60, 10 * restarts)
+            send_ui("log", text=f"⚠️ Bot crash hua — {wait}s baad KHUD restart ho raha hai "
+                                f"(koshish {restarts}/{MAX_RESTARTS}). Aaj ke joins safe hain, "
+                                f"wahin se continue hoga.")
+            # Chromium ke stale lock hata do (unclean exit ke baad relaunch
+            # rok sakte hain)
+            for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    os.remove(os.path.join(PW_PROFILE_DIR, _lk))
+                except Exception:
+                    pass
+            time.sleep(wait)
+            if stop_event.is_set():          # wait ke doran user ne STOP dabaya
+                break
+            config["_end_reason"] = "completed"
+            _GEMINI_DEAD_REASON = None     # already declared global at top of fn
+            try:
+                act.start_session()
+            except Exception:
+                pass
+            continue
+
+    send_ui("stopped")
 
 # ── Tkinter UI ────────────────────────────────────────────────
 
@@ -2935,7 +3157,7 @@ RED       = "#ef4444"
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"FB Group Joiner — Account {INSTANCE}   ·   build v{_build_no()}")
+        self.root.title(f"FB Group Joiner  v{APP_VERSION}  —  Account {INSTANCE}   ·   build {_build_no()}")
         # 2-column layout. Left settings scroll karte hain aur START button
         # left column ke neeche PINNED hai — isliye chhoti screen par bhi
         # START hamesha nazar aata hai.
@@ -3027,13 +3249,17 @@ class App:
         save_settings(s)
 
     def _persist_simple(self):
-        """Page link + area turant save — har profile (account) ka apna
-        alag, taake dobara khulne par bhare rahein aur ek doosre ko
-        overwrite na karein."""
+        """Page link + area + pacing settings turant save — har profile
+        (account) ka apna alag, taake dobara khulne par bhare rahein aur ek
+        doosre ko overwrite na karein."""
         try:
             s = load_settings()
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
+            if hasattr(self, "pace_var"):
+                s[f"pace_enabled{SUFFIX}"] = bool(self.pace_var.get())
+                s[f"work_start{SUFFIX}"] = self.work_start_var.get().strip()
+                s[f"work_end{SUFFIX}"] = self.work_end_var.get().strip()
             save_settings(s)
         except Exception:
             pass
@@ -3301,6 +3527,8 @@ class App:
         row.pack(fill="x", padx=16, pady=(14, 2))
         tk.Label(row, text="FB Group Joiner", bg=CARD_BG, fg=TXT,
                  font=("Segoe UI", 16, "bold")).pack(side="left")
+        tk.Label(row, text=f"v{APP_VERSION}", bg=CARD_BG, fg=TXT_MUTED,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(8, 0))
         tk.Label(row, text=f"  ACCOUNT {INSTANCE}  ", bg=FB_BLUE, fg="white",
                  font=("Segoe UI", 8, "bold")).pack(side="left", padx=(10, 0), pady=4)
         self.status_var = tk.StringVar(value="●  Idle — press START to begin")
@@ -3439,6 +3667,36 @@ class App:
         self.delay_max_var = tk.IntVar(value=12)
         self._entry(col4, self.delay_max_var, pady=(2, 4))
 
+        # ── Human pacing (account safety) ──
+        _pace_def = _s0.get(f"pace_enabled{SUFFIX}")
+        if _pace_def is None:
+            _pace_def = _s0.get("pace_enabled", True)
+        self.pace_var = tk.BooleanVar(value=bool(_pace_def))
+        tk.Checkbutton(card,
+                       text="Human pacing — spread joins across the day + take breaks (recommended)",
+                       variable=self.pace_var, bg=CARD_BG, fg=TXT_MUTED,
+                       selectcolor=INPUT_BG, activebackground=CARD_BG,
+                       activeforeground=TXT, font=("Segoe UI", 8),
+                       highlightthickness=0, bd=0,
+                       command=self._persist_simple).pack(anchor="w", pady=(8, 2))
+        wrow = tk.Frame(card, bg=CARD_BG); wrow.pack(fill="x")
+        wc1 = tk.Frame(wrow, bg=CARD_BG); wc1.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        wc2 = tk.Frame(wrow, bg=CARD_BG); wc2.pack(side="left", expand=True, fill="x")
+        self._label(wc1, "Work start (HH:MM)")
+        self.work_start_var = tk.StringVar(
+            value=_s0.get(f"work_start{SUFFIX}") or _s0.get("work_start") or "09:00")
+        self._entry(wc1, self.work_start_var, pady=(2, 4))
+        self._label(wc2, "Work end (HH:MM)")
+        self.work_end_var = tk.StringVar(
+            value=_s0.get(f"work_end{SUFFIX}") or _s0.get("work_end") or "21:00")
+        self._entry(wc2, self.work_end_var, pady=(2, 4))
+        self.work_start_var.trace_add("write", lambda *a: self._persist_simple())
+        self.work_end_var.trace_add("write", lambda *a: self._persist_simple())
+        tk.Label(card, text="Pacing ON = 'Delay Min/Max' ignore; joins din bhar "
+                            "phaila ke honge. Same HH:MM dono = 24h.",
+                 bg=CARD_BG, fg=TXT_MUTED, font=("Segoe UI", 7),
+                 wraplength=380, justify="left").pack(anchor="w", pady=(0, 2))
+
         # ── Public / Private target mix ──
         row3 = tk.Frame(card, bg=CARD_BG); row3.pack(fill="x", pady=(8, 0))
         self._label(row3, "Public %  (rest = Private)")
@@ -3550,7 +3808,7 @@ class App:
         self.progress = ttk.Progressbar(pb_frame, maximum=250, mode="determinate",
                                          style="FB.Horizontal.TProgressbar")
         self.progress.pack(fill="x")
-        self.progress_lbl_var = tk.StringVar(value="0 / 250 joined this session")
+        self.progress_lbl_var = tk.StringVar(value="0 / 250 joined today")
         tk.Label(pb_frame, textvariable=self.progress_lbl_var,
                  bg=BG, font=("Segoe UI", 9), fg=TXT_MUTED).pack(pady=(3, 0))
 
@@ -3666,7 +3924,7 @@ class App:
             self._update_stats()
             self.progress["maximum"] = self.daily_limit_var.get()
             self.progress["value"]   = 0
-            self.progress_lbl_var.set(f"0 / {self.daily_limit_var.get()} joined this session")
+            self.progress_lbl_var.set(f"0 / {self.daily_limit_var.get()} joined today")
             self.now_area_var.set("Area: starting...")
             self.now_target_var.set("Search: —")
             self.running = True
@@ -3692,11 +3950,17 @@ class App:
                 "same_state_only": bool(self.same_state_var.get()),
                 "include_counties": bool(self.include_counties_var.get()),
                 "custom_blocked": self._block_keywords(),
+                "pace_enabled": bool(self.pace_var.get()),
+                "work_start":  self.work_start_var.get().strip() or "09:00",
+                "work_end":    self.work_end_var.get().strip() or "21:00",
             }
             self._persist_gemini()          # remember keys for next time
             s = load_settings()
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
+            s[f"pace_enabled{SUFFIX}"] = bool(self.pace_var.get())
+            s[f"work_start{SUFFIX}"] = self.work_start_var.get().strip() or "09:00"
+            s[f"work_end{SUFFIX}"] = self.work_end_var.get().strip() or "21:00"
             s["public_pct"] = self._public_pct()
             s["skip_no_post"] = bool(self.skip_nopost_var.get())
             s["same_state_only"] = bool(self.same_state_var.get())
@@ -3736,7 +4000,7 @@ class App:
                     self.joined_today = msg["count"]
                     self._update_stats()
                     self.progress["value"] = self.joined_today
-                    self.progress_lbl_var.set(f"{self.joined_today} / {self.daily_limit_var.get()} joined this session")
+                    self.progress_lbl_var.set(f"{self.joined_today} / {self.daily_limit_var.get()} joined today")
                 elif t == "skipped":
                     self.skipped_today += 1
                     self._update_stats()
@@ -3764,7 +4028,7 @@ class App:
                     self.logout_btn.config(state="normal")
                     self.status_var.set("●  Idle — press START to begin")
                     self.now_target_var.set("Search: —")
-                    self._log(f"📊 This session: {self.joined_today} joined | {self.skipped_today} skipped")
+                    self._log(f"📊 Today: {self.joined_today} joined | {self.skipped_today} skipped this run")
                     self._refresh_license_ui()  # expire hui to START dobara lock
         except queue.Empty:
             pass
@@ -3783,7 +4047,7 @@ def _self_update():
     naye code ke saath restart karo. Frozen .exe par skip (chalti exe
     replace nahi hoti)."""
     if getattr(sys, "frozen", False) or "--no-update" in sys.argv:
-        print(f"[build] running build v{_build_no()} (auto-update off)")
+        print(f"[build] FB Group Joiner v{APP_VERSION} (build {_build_no()}) - auto-update off")
         return
     try:
         import updater
@@ -3820,7 +4084,7 @@ def _self_update():
         raise
     except Exception:
         pass
-    print(f"[build] running build v{_build_no()}")
+    print(f"[build] FB Group Joiner v{APP_VERSION} (build {_build_no()})")
 
 
 if __name__ == "__main__":

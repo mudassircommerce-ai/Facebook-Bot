@@ -247,6 +247,12 @@ class ActivityLog:
             self.page_link = link or ""
         self._push("heartbeat")
 
+    def joined_today(self) -> int:
+        """Aaj ke din ab tak kitne group join ho chuke (persistent — bot
+        restart/crash/PC-reboot ke baad bhi yehi count aage badhta hai)."""
+        with self._lock:
+            return int(self._data.get("daily", {}).get(date.today().isoformat(), 0))
+
     def start_session(self) -> None:
         with self._lock:
             self._session = {

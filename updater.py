@@ -48,6 +48,52 @@ def _get(url: str, timeout: int = 20) -> bytes:
         return r.read()
 
 
+# ── Owner ka remote ON/OFF switch ────────────────────────────
+# Owner  service_control.py  se ek signed  service.json  banata hai aur GitHub
+# (UPDATE_URL) par upload kar deta hai. Har bot START par + har 2 min chalte
+# hue ise check karta hai. Owner jab chahe sab (ya kuch chunide) employees ke
+# bot rok/chalu kar sakta hai — unke PC chhue bina.
+def check_service(update_url: str) -> dict:
+    """
+    service.json fetch + RSA-verify. Return:
+      {"enabled": bool, "message": str, "off": [employee names lowercased]}
+    Fetch fail / file na ho / signature galat -> {"enabled": True, ...}
+    (FAIL-OPEN — GitHub down ho ya owner ne setup na kiya ho to bot na ruke.)
+    """
+    off_none = {"enabled": True, "message": "", "off": []}
+    update_url = (update_url or "").strip().rstrip("/")
+    if not update_url:
+        return off_none
+    try:
+        data = json.loads(_get(update_url + "/service.json", timeout=10).decode("utf-8"))
+    except Exception:
+        return off_none
+    sig = data.pop("sig", "")
+    try:
+        import license_common as lic
+        body = json.dumps(data, separators=(",", ":"), sort_keys=True)
+        if not lic._verify(lic._b64u(body.encode()), sig,
+                           lic.LICENSE_PUBKEY_N, lic.LICENSE_PUBKEY_E):
+            return off_none
+    except Exception:
+        return off_none
+    return {
+        "enabled": bool(data.get("enabled", True)),
+        "message": str(data.get("message", "")),
+        "off": [str(x).strip().lower() for x in data.get("off", []) if str(x).strip()],
+    }
+
+
+def service_allows(update_url: str, employee: str):
+    """Is employee ka bot chal sakta hai? -> (bool, message)."""
+    s = check_service(update_url)
+    if not s["enabled"]:
+        return False, (s["message"] or "Bot is paused by the administrator.")
+    if (employee or "").strip().lower() in s["off"]:
+        return False, (s["message"] or "Your bot is paused by the administrator.")
+    return True, ""
+
+
 def check_and_apply(update_url: str, base_dir: str, log=print, alert=None) -> bool:
     """
     Return True agar files update hui / heal hui (caller ko chahiye ke bot
