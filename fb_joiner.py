@@ -26,7 +26,7 @@ import numpy as np
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 
-from areas import AREAS
+from areas import AREAS, CAR_AREAS, DUCT_AREAS, areas_for
 
 # ── License + Usage tracking ────────────────────────────────
 # license_common.py = key verify karta hai (public key isme embedded).
@@ -66,7 +66,7 @@ os.chdir(APP_DIR)   # relative log/csv files bhi yahin banein
 # Credentials ki zaroorat NAHI — Chrome profile use hoga
 PW_PROFILE_DIR = os.path.join(APP_DIR, f"pw_profile{SUFFIX}")
 
-ALL_AREAS_LABEL = "🌎 ALL AREAS (loop through all 65 areas)"
+ALL_AREAS_LABEL = "🌎 ALL AREAS (loop through every area in this list)"
 AREA_CACHE_FILE = os.path.join(APP_DIR, "areas_cache.json")
 
 # Account 1 ke liye purana default page rakha hai (backward compatible).
@@ -270,7 +270,10 @@ _GK_COOLDOWN_SEC = 90     # 429 ke baad key kitni der aaram kare
 _ACT = None               # current session ka ActivityLog — module-level
                           # functions (jaise _gemini_sync) se bhi Discord
                           # alert bhejne ke liye
-_GEMINI_DEAD_REASON = None  # set hota hai jab saari Gemini keys fail ho jayein
+_GEMINI_DEAD_REASON = None    # (legacy — ab set nahi hota; bot Gemini fail par
+                             #  rukta NAHI, template answers pe chalta hai)
+_GK_ALL_DOWN_UNTIL = 0.0     # saari keys down mile to itne der (monotonic) tak
+                             #  poora retry-pass skip karo, seedha template
 
 
 def load_settings() -> dict:
@@ -468,47 +471,39 @@ def _gemini_sync(question, city):
     to cooldown mein hi rahengi aur retry bhi turant fail hoga — is case
     mein rukna abhi bhi turant (~6 sec) hi hota hai.
     """
-    global _GEMINI_DEAD_REASON
+    global _GK_ALL_DOWN_UNTIL
     keys = GEMINI_KEYS
     n = len(keys)
     if n == 0:
+        return None
+
+    # Abhi-abhi saari keys down mili thi -> 10 min tak poora retry-pass mat
+    # karo, seedha None (template) — warna har sawaal par 6s+ zaya hote hain.
+    if time.monotonic() < _GK_ALL_DOWN_UNTIL:
         return None
 
     ans = _gk_one_pass(question, city, keys, n)
     if ans:
         return ans
 
-    send_ui("log", text="   ⏳ All keys failed this round — retrying once "
-                        "before giving up (may be a temporary blip)...")
-    time.sleep(6)
+    time.sleep(4)
     ans = _gk_one_pass(question, city, keys, n)
     if ans:
         return ans
 
-    # Retry ke baad bhi saari keys fail — ab genuinely maano ke AI se koi
-    # jawab nahi mil sakta. Sirf pehli baar hi alert + stop (baar-baar
-    # Discord spam na ho).
-    if not stop_event.is_set():
-        send_ui("log", text=f"⛔ All {n} Gemini API key(s) failing/rate-limited "
-                             f"— stopping bot (AI answers required, no fallback).")
-        _GEMINI_DEAD_REASON = "gemini_keys_failed"
-        _dmsg = (f"⚠️ GEMINI API KEYS DOWN — saari {n} key(s) rate-limited/error "
-                 f"ho gayi hain. Bot ROK diya gaya hai. Naye/extra Gemini keys "
-                 f"chahiye ya thodi der baad dobara START karo.")
-        _sent = False
-        if _ACT:
-            try:
-                _ACT.alert(_dmsg)
-                _sent = True
-            except Exception:
-                pass
-        if not _sent:      # _ACT na ho to bhi Discord pe reason zaroor jaye
-            try:
-                import activity
-                activity.send_alert("bot", _dmsg)
-            except Exception:
-                pass
-        stop_event.set()
+    # Retry ke baad bhi saari keys fail. Bot ko ROKTA NAHI — sirf is sawaal
+    # ka jawab built-in template se dega aur chalta rahega. Ek Discord note
+    # (spam nahi), phir 10 min tak Gemini try hi nahi karega.
+    if time.monotonic() >= _GK_ALL_DOWN_UNTIL:
+        send_ui("log", text=f"⚠️ All {n} Gemini key(s) rate-limited/down — using "
+                             f"built-in template answers for now (joining continues).")
+        _dmsg = (f"⚠️ Gemini keys temporarily down ({n} keys) — bot switched to "
+                 f"template answers and KEEPS RUNNING. Will retry Gemini in ~10 min.")
+        try:
+            (_ACT.alert(_dmsg) if _ACT else __import__("activity").send_alert("bot", _dmsg))
+        except Exception:
+            pass
+    _GK_ALL_DOWN_UNTIL = time.monotonic() + 600
     return None
 
 
@@ -623,16 +618,19 @@ def save_total_skipped(n):
 _pgeo = pgeocode.Nominatim('us')
 _geo  = Nominatim(user_agent="fb_group_joiner_v1", timeout=10)
 
-def load_area_cache() -> dict:
-    """areas_cache.json load karo (build_area_cache.py se pehle se generate hoti hai)."""
-    if not Path(AREA_CACHE_FILE).exists():
+def load_area_cache(fname: str = None) -> dict:
+    """Pre-built radius cache load karo (cities/counties per area)."""
+    p = Path(fname) if fname else Path(AREA_CACHE_FILE)
+    if not p.exists():
         return {}
     try:
-        return json.loads(Path(AREA_CACHE_FILE).read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
-_AREA_CACHE = load_area_cache()
+# CAR areas -> 40-mile cache ;  DUCT areas -> 50-mile cache (alag file)
+_AREA_CACHE      = load_area_cache()
+_AREA_CACHE_DUCT = load_area_cache(os.path.join(APP_DIR, "areas_cache_duct.json"))
 
 def get_nearby_cities(city_state: str, radius_miles: int = 50) -> list:
     """
@@ -687,22 +685,21 @@ def _target_state(target: str) -> str:
 
 
 def get_targets_for_area(area: str, same_state_only: bool = True,
-                          include_counties: bool = True) -> list:
+                          include_counties: bool = True, mode: str = "car") -> list:
     """
-    Ek area (e.g. 'Waco Texas') ke liye search targets (cities + counties)
-    return karo. Pehle cache check karo (fast), warna live calculate karo.
-    same_state_only=True -> sirf usi state ki cities/counties (border par
-    50-mile radius dusre state mein ghus jata tha — ab nahi).
-    include_counties=False -> sirf cities, county-level targets skip
-    (employee ki apni choice — UI checkbox se).
+    Ek area (e.g. 'Dallas TX') ke liye search targets (cities + counties)
+    return karo. Pehle pre-built cache dekho (fast), warna live calculate.
+    mode="duct" -> 50-mile cache (areas_cache_duct.json).
+    mode="car"  -> 40-mile cache (areas_cache.json).
     """
-    cached = _AREA_CACHE.get(area)
+    _c = _AREA_CACHE_DUCT if (mode or "car").lower() == "duct" else _AREA_CACHE
+    cached = _c.get(area) or _AREA_CACHE.get(area)
     if cached:
         targets = list(cached.get("cities", []))
         if include_counties:
             targets += list(cached.get("counties", []))
     else:
-        targets = get_nearby_cities(area, 50)
+        targets = get_nearby_cities(area, 50 if (mode or "").lower() == "duct" else 40)
 
     if same_state_only:
         st = _area_state_code(area)
@@ -799,7 +796,10 @@ class HumanPacer:
 
     def _secs_left_in_window(self):
         if self.win_start == self.win_end:
-            return 12 * 3600
+            # 24h mode — quota poore din (midnight tak) mein phailao;
+            # kam se kam 2h ka runway rakho (raat ko START ho to bhi)
+            n = self._now_min()
+            return max(2 * 3600, (24 * 60 - n) * 60)
         n = self._now_min()
         if self.win_start < self.win_end:
             return max(60, (self.win_end - n) * 60)
@@ -2397,8 +2397,23 @@ async def join_one_group(page, url, name, area, config):
 
     except Exception as e:
         import traceback
-        with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
-            ef.write(f"\n--- {datetime.now()} | {name} ---\n{e}\n{traceback.format_exc()}\n")
+        try:
+            with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+                ef.write(f"\n--- {datetime.now()} | {name} ---\n{e}\n{traceback.format_exc()}\n")
+        except Exception:
+            pass
+        # Browser / page hi mar gaya (crash, OOM, band ho gaya) -> is error ko
+        # NIGAL kar "skipped" mat batao. Warna dead browser ke saath 100s
+        # groups chup-chaap "skip" hote rehte hain aur "Done, joined 0" aata
+        # hai. Ise upar bhejo -> run_playwright fresh browser se auto-restart karega.
+        _es = (str(e) + " " + type(e).__name__).lower()
+        if any(k in _es for k in ("target closed", "targetclosed", "browser has been closed",
+                                  "page has been closed", "connection closed",
+                                  "browser.newcontext", "crashed", "playwright._impl",
+                                  "has been closed", "websocket", "econnreset",
+                                  "session closed")):
+            send_ui("log", text=f"🔁 Browser lost ({str(e)[:60]}) — will relaunch and continue.")
+            raise
         send_ui("log", text=f"⏭️  Error: {str(e)[:80]}")
         log_csv(area, name, url, "error")
         return "skipped"
@@ -2762,11 +2777,10 @@ async def playwright_main(config):
         if switched:
             send_ui("log", text=f"✅ Switched to page '{page_name or page_link}'!")
         else:
-            send_ui("log", text="❌ Could not switch to the page — never joining from personal profile. Stopping.")
-            send_ui("log", text="   Check: (1) Page Link is correct (2) This account is an admin of the page")
+            send_ui("log", text="❌ Could not switch to the Page — the bot never joins from a personal profile.")
+            send_ui("log", text="   Check: (1) Page Link is correct  (2) this account is an admin of the Page")
             config["_end_reason"] = "setup_failed"
             await ctx.close()
-            send_ui("stopped")
             return
 
         # ── License watchdog — har 2 min: heartbeat + expiry check ──
@@ -2867,56 +2881,81 @@ async def playwright_main(config):
 
         selection = config["city"]
         limit     = config["daily_limit"]
+        _mode     = config.get("business_mode", "car")
+        _area_list = areas_for(_mode)
+        send_ui("log", text=f"🧩 Mode: {_mode.upper()}  ·  {len(_area_list)} areas in this list")
 
-        # "ALL AREAS" select ho toh saari 65 areas loop karo, warna sirf ek
+        # Area order: agar ek specific area chuna hai to WOH pehle, phir
+        # baaki SAARE areas (taake area khatam hone par bot rukta nahi —
+        # khud agle area par chala jata hai). "ALL AREAS" = sab shuffle.
+        _others = [a for a in _area_list if a != selection]
+        random.shuffle(_others)
         if selection == ALL_AREAS_LABEL:
-            areas_to_run = AREAS.copy()
-            random.shuffle(areas_to_run)
+            areas_to_run = _others
         else:
-            areas_to_run = [selection]
+            areas_to_run = [selection] + _others
 
         total_areas = len(areas_to_run)
-        send_ui("log", text=f"📍 {total_areas} area(s) to process")
+        send_ui("log", text=f"📍 {total_areas} area(s) queued "
+                            f"— bot won't stop when one finishes, it moves to the next.")
 
-        for area_idx, area in enumerate(areas_to_run, 1):
-            if stop_event.is_set() or joined_today >= limit:
-                break
+        # OUTER loop: saare areas khatam ho jayein aur limit bhi na lagi ho
+        # to phir se shuru (naye bane groups mil sakte hain). Ek poore pass
+        # mein 0 naye join mile -> ab genuinely kuch nahi bacha, tab rukein.
+        _pass = 0
+        while not stop_event.is_set() and joined_today < limit:
+            _pass += 1
+            _pass_start = joined_today
+            if _pass > 1:
+                send_ui("log", text=f"\n🔁 Pass {_pass} — re-scanning all areas for new groups…")
+                random.shuffle(areas_to_run)
 
-            send_ui("log", text=f"\n🏙️  Area {area_idx}/{total_areas}: {area}")
-            send_ui("area", text=f"Area {area_idx}/{total_areas}: {area}")
-
-            # Cache se cities + counties nikalo (fast). Custom typed city ho
-            # toh cache mein nahi hogi — live calculate hoga (thoda slow).
-            loop = asyncio.get_event_loop()
-            _same_state = config.get("same_state_only", True)
-            _inc_counties = config.get("include_counties", True)
-            targets = await loop.run_in_executor(
-                None, get_targets_for_area, area, _same_state, _inc_counties)
-            random.shuffle(targets)
-            _st = _area_state_code(area)
-            send_ui("log", text=f"   🗺️  {len(targets)} targets"
-                    + (f" — {_st} only (50-mi radius)" if _same_state and _st
-                       else "")
-                    + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
-
-            area_joined_start = joined_today
-            for target in targets:
+            for area_idx, area in enumerate(areas_to_run, 1):
                 if stop_event.is_set() or joined_today >= limit:
                     break
-                config["_current_city"] = target
-                n_joined, n_skipped = await search_and_join(
-                    page, target, already_joined, config, joined_today, pacer)
-                joined_today  += n_joined
-                skipped_today += n_skipped
-                total         += n_joined
-                total_skipped += n_skipped
-                save_total(total)
-                save_total_skipped(total_skipped)
-                send_ui("total", count=total)
-                send_ui("total_skipped", count=total_skipped)
 
-            area_joined = joined_today - area_joined_start
-            send_ui("log", text=f"   ✅ Area '{area}' complete: joined {area_joined} groups")
+                send_ui("log", text=f"\n🏙️  Area {area_idx}/{total_areas}: {area}")
+                send_ui("area", text=f"Area {area_idx}/{total_areas}: {area}")
+
+                loop = asyncio.get_event_loop()
+                _same_state = config.get("same_state_only", True)
+                _inc_counties = config.get("include_counties", True)
+                targets = await loop.run_in_executor(
+                    None, get_targets_for_area, area, _same_state, _inc_counties, _mode)
+                random.shuffle(targets)
+                _st = _area_state_code(area)
+                send_ui("log", text=f"   🗺️  {len(targets)} targets"
+                        + (f" — {_st} only (50-mi radius)" if _same_state and _st
+                           else "")
+                        + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
+
+                area_joined_start = joined_today
+                for target in targets:
+                    if stop_event.is_set() or joined_today >= limit:
+                        break
+                    config["_current_city"] = target
+                    n_joined, n_skipped = await search_and_join(
+                        page, target, already_joined, config, joined_today, pacer)
+                    joined_today  += n_joined
+                    skipped_today += n_skipped
+                    total         += n_joined
+                    total_skipped += n_skipped
+                    save_total(total)
+                    save_total_skipped(total_skipped)
+                    send_ui("total", count=total)
+                    send_ui("total_skipped", count=total_skipped)
+
+                area_joined = joined_today - area_joined_start
+                send_ui("log", text=f"   ✅ Area '{area}' done: +{area_joined} groups")
+
+            # Poora pass khatam — is pass mein kuch mila?
+            if joined_today - _pass_start == 0:
+                send_ui("log", text="\nℹ️ Full pass over all areas found no new groups "
+                                    "to join right now. Nothing left — you can run again later.")
+                config["_end_reason"] = "nothing_left"
+                break
+            if _pass >= 25:      # safety — infinite loop se bacho
+                break
 
         try:
             wd_task.cancel()
@@ -2926,20 +2965,19 @@ async def playwright_main(config):
                 pass
         except Exception:
             pass
-        if _GEMINI_DEAD_REASON:
-            config["_end_reason"] = _GEMINI_DEAD_REASON
-        elif config.get("_end_reason") not in ("license_expired", "account_blocked",
-                                                "pending_limit", "setup_failed",
-                                                "file_tamper", "service_paused",
-                                                "login_timeout", "no_page_link"):
+        if config.get("_end_reason") not in ("license_expired", "account_blocked",
+                                              "pending_limit", "setup_failed",
+                                              "file_tamper", "service_paused",
+                                              "login_timeout", "no_page_link",
+                                              "nothing_left"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         _this_run = joined_today - _session_start
-        send_ui("log", text=f"\n🎉 Done! This run: joined {_this_run} groups, skipped {skipped_today}. "
+        config["_run_joined"]  = _this_run
+        config["_today_total"] = joined_today
+        send_ui("log", text=f"\n🎉 This run: joined {_this_run} groups, skipped {skipped_today}. "
                             f"Today's total: {joined_today}/{config.get('daily_limit', 250)}.")
-        send_ui("log", text="✅ Session complete!")
         await ctx.close()
-        send_ui("stopped")
 
 async def _login_browser_main():
     """Sirf browser kholo Facebook pe — user login karega, joining kuch
@@ -3197,11 +3235,12 @@ def run_playwright(config):
         return
 
     # ── Gemini AI answers (optional, key rotation) ──
-    global GEMINI_KEYS, _gk_idx, _GEMINI_DEAD_REASON
+    global GEMINI_KEYS, _gk_idx, _GEMINI_DEAD_REASON, _GK_ALL_DOWN_UNTIL
     GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
     _gk_idx = 0
     _gk_cooldown.clear()
     _GEMINI_DEAD_REASON = None   # purani run ka stale flag na reh jaye
+    _GK_ALL_DOWN_UNTIL = 0.0
     send_ui("log", text=(f"🤖 AI answers ON ({GEMINI_MODEL}) — {len(GEMINI_KEYS)} key(s) in rotation")
             if GEMINI_KEYS else "💬 AI answers OFF — using built-in template answers")
 
@@ -3240,83 +3279,94 @@ def run_playwright(config):
     config["_end_reason"] = "completed"
 
     # ── Auto-resume on crash ──────────────────────────────────
-    # Bot / browser beech mein crash ho jaye (ya browser window band ho
-    # jaye) to khud restart hota hai aur AAJ ke joins wahin se continue
-    # karta hai (joined_today persistent hai). User ne STOP dabaya ho ya
-    # koi terminal reason ho (license / block / gemini / tamper) to restart
-    # NAHI hota. Max 6 koshish, badhta hua wait.
+    # Crash / browser band ho jaye -> khud restart, aaj ke joins wahin se
+    # continue (joined_today persistent). STOP dabaya / terminal reason
+    # (license / block / gemini / etc.) -> restart NAHI. end_session sirf
+    # EK baar (end mein) — warna Discord par baar-baar "stopped" spam hota
+    # tha jo "bina wajah band" jaisa lagta tha.
+    import traceback
     MAX_RESTARTS = 6
     _terminal = ("license_expired", "account_blocked", "pending_limit",
                  "setup_failed", "file_tamper", "gemini_keys_failed",
-                 "service_paused", "login_timeout", "no_page_link")
+                 "service_paused", "login_timeout", "no_page_link",
+                 "nothing_left")
     restarts = 0
-    while True:
-        try:
-            asyncio.run(playwright_main(config))
-            act.end_session(config.get("_end_reason", "completed"))
-            break                                   # normal / terminal finish
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
+    _last_err = ""
+    try:
+        while True:
             try:
-                with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
-                    ef.write(f"\n--- {datetime.now()} | crash (run_playwright) ---\n{tb}\n")
-            except Exception:
-                pass
-            try:
-                act.end_session("error")
-            except Exception:
-                pass
+                asyncio.run(playwright_main(config))
+                break                                       # normal / terminal finish
+            except SystemExit:
+                raise
+            except BaseException as e:
+                _last_err = f"{type(e).__name__}: {str(e)[:150]}".strip()
+                try:
+                    with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+                        ef.write(f"\n--- {datetime.now()} | crash ---\n{traceback.format_exc()}\n")
+                except Exception:
+                    pass
 
-            # User ne STOP dabaya / terminal reason -> restart nahi
-            if stop_event.is_set() or config.get("_end_reason") in _terminal:
-                if config.get("_end_reason", "completed") == "completed":
-                    config["_end_reason"] = "user_stop" if stop_event.is_set() else "error"
-                if not stop_event.is_set():
-                    send_ui("log", text=f"❌ Error: {str(e)[:120]}  (error_log{SUFFIX}.txt)")
-                break
+                if stop_event.is_set():
+                    if config.get("_end_reason", "completed") == "completed":
+                        config["_end_reason"] = "user_stop"
+                    break
+                if config.get("_end_reason") in _terminal:
+                    break
 
-            restarts += 1
-            if restarts > MAX_RESTARTS:
-                config["_end_reason"] = "error"
-                send_ui("log", text=f"❌ Crashed {MAX_RESTARTS} times — giving up now. "
-                                    f"Please press START again.  📞 Contact {BRAND}")
+                restarts += 1
+                if restarts > MAX_RESTARTS:
+                    config["_end_reason"] = "error"
+                    break
+
+                wait = min(75, 15 * restarts)
+                send_ui("log", text=f"⚠️ Bot crashed ({_last_err}) — auto-restarting in "
+                                    f"{wait}s (attempt {restarts}/{MAX_RESTARTS}). "
+                                    f"DON'T press START — it continues by itself. "
+                                    f"Today's joins are safe.")
                 try:
                     _a = config.get("_activity")
-                    if _a:
-                        _a.alert(f"Bot crashed {MAX_RESTARTS} times and auto-restart failed — "
-                                 f"this profile needs a manual START.  Contact {BRAND}")
+                    if _a and restarts == 1:
+                        _a.alert(f"Bot crashed ({_last_err}) — auto-restarting. "
+                                 f"No action needed unless it keeps happening.")
                 except Exception:
                     pass
-                break
+                for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                    try:
+                        os.remove(os.path.join(PW_PROFILE_DIR, _lk))
+                    except Exception:
+                        pass
+                time.sleep(wait)
+                if stop_event.is_set():
+                    config["_end_reason"] = "user_stop"
+                    break
+                config["_end_reason"] = "completed"
+                _GEMINI_DEAD_REASON = None    # already declared global at top of fn
+                continue
+    except SystemExit:
+        raise
+    except BaseException as e:
+        config["_end_reason"] = "error"
+        _last_err = f"{type(e).__name__}: {str(e)[:150]}".strip()
+        try:
+            with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+                ef.write(f"\n--- {datetime.now()} | run_playwright outer crash ---\n"
+                         f"{traceback.format_exc()}\n")
+        except Exception:
+            pass
 
-            wait = min(60, 10 * restarts)
-            send_ui("log", text=f"⚠️ Bot crashed — restarting itself in {wait}s "
-                                f"(attempt {restarts}/{MAX_RESTARTS}). Today's joins are safe, "
-                                f"it will continue from there.")
-            # Chromium ke stale lock hata do (unclean exit ke baad relaunch
-            # rok sakte hain)
-            for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                try:
-                    os.remove(os.path.join(PW_PROFILE_DIR, _lk))
-                except Exception:
-                    pass
-            time.sleep(wait)
-            if stop_event.is_set():          # wait ke doran user ne STOP dabaya
-                break
-            config["_end_reason"] = "completed"
-            _GEMINI_DEAD_REASON = None     # already declared global at top of fn
-            try:
-                act.start_session()
-            except Exception:
-                pass
-            continue
+    # ── end_session ONCE (not per retry) ──
+    try:
+        act.end_session(config.get("_end_reason", "completed"))
+    except Exception:
+        pass
 
-    # ── Always show a CLEAR stop reason (UI + Discord) so it never looks "random" ──
+    # ── ALWAYS a clear stop reason (UI + Discord) — never "random / silent" ──
     _reason = config.get("_end_reason", "completed")
     _RMAP = {
-        "completed":        "✅ Daily target reached / all done — normal stop.",
+        "completed":        "✅ Daily target reached — normal stop.",
         "user_stop":        "⏹️ You pressed STOP.",
+        "nothing_left":     "✅ Went through every area — no new groups left to join right now. Run again later.",
         "license_expired":  "⛔ License key expired/invalid — activate a new key.",
         "account_blocked":  "🚫 Facebook checkpoint/block on this account — give this ID a few days of rest.",
         "pending_limit":    "⏸️ Facebook applied a join-request limit (too many pending) — get some approved/cancelled.",
@@ -3326,21 +3376,41 @@ def run_playwright(config):
         "setup_failed":     "❌ Could not switch to the Page — check the Page Link / admin access.",
         "no_page_link":     "❌ Page Link is empty — enter your Facebook Page link.",
         "login_timeout":    "❌ Login timed out — log in to Facebook in the browser, then START.",
-        "error":            "❌ Bot crashed (details in error_log).",
+        "error":            f"❌ Bot crashed{(' — ' + _last_err) if _last_err else ''} "
+                            f"(see error_log{SUFFIX}.txt). Restarted {restarts} time(s).",
     }
-    _normal = ("completed", "user_stop")
-    _msg = _RMAP.get(_reason, f"Stopped (reason: {_reason}).")
+    _normal = ("completed", "user_stop", "nothing_left")
+    _run_j = config.get("_run_joined")
+    _tot   = config.get("_today_total")
+    _lim   = config.get("daily_limit", 250)
+
+    if _reason == "completed":
+        if _run_j == 0 and _tot is not None and _tot >= _lim:
+            _msg = (f"✅ Today's limit ({_lim}) is already reached — nothing more to do "
+                    f"until tomorrow. This is NORMAL — no need to keep restarting.")
+        elif _run_j is not None:
+            _msg = (f"✅ Finished this run — joined {_run_j}, today's total "
+                    f"{_tot}/{_lim}. Normal stop.")
+        else:
+            _msg = _RMAP["completed"]
+    else:
+        _msg = _RMAP.get(_reason, f"Stopped (reason: {_reason}).")
     if _reason not in _normal:
         _msg += f"\n   📞  If it doesn't resolve → Contact {BRAND}"
+
     send_ui("log", text=f"\n■ BOT STOPPED — {_msg}")
-    if _reason not in _normal:
-        try:
-            _a = config.get("_activity")
-            if _a:
-                _a.alert(f"BOT STOPPED ({_reason}) — {_RMAP.get(_reason, _reason)}  "
-                         f"·  Contact {BRAND}")
-        except Exception:
-            pass
+
+    # Discord: har stop par ek saaf line — "bina wajah band" kabhi na lage
+    try:
+        _a = config.get("_activity")
+        if _a:
+            if _reason in _normal:
+                _a._last_chat = 0.0
+                _a._push_text(f"⏹️ BOT STOPPED — {_msg}")
+            else:
+                _a.alert(f"■ BOT STOPPED — {_RMAP.get(_reason, _reason)}  ·  Contact {BRAND}")
+    except Exception:
+        pass
 
     send_ui("stopped")
 
@@ -3472,13 +3542,15 @@ class App:
         save_settings(s)
 
     def _persist_simple(self):
-        """Page link + area + pacing settings turant save — har profile
+        """Page link + area + pacing + business mode turant save — har profile
         (account) ka apna alag, taake dobara khulne par bhare rahein aur ek
         doosre ko overwrite na karein."""
         try:
             s = load_settings()
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
+            if hasattr(self, "business_var"):
+                s[f"business_mode{SUFFIX}"] = self.business_var.get()
             if hasattr(self, "pace_var"):
                 s[f"pace_enabled{SUFFIX}"] = bool(self.pace_var.get())
                 s[f"work_start{SUFFIX}"] = self.work_start_var.get().strip()
@@ -3486,6 +3558,21 @@ class App:
             save_settings(s)
         except Exception:
             pass
+
+    def _on_business_change(self):
+        """Car <-> Duct toggle — Area dropdown ko us list se refresh karo,
+        selection reset (purana area nayi list mein na ho to)."""
+        mode = self.business_var.get()
+        lst = areas_for(mode)
+        try:
+            self.area_combo.config(values=[ALL_AREAS_LABEL] + lst)
+        except Exception:
+            pass
+        if self.city_var.get() not in lst:
+            self.city_var.set(ALL_AREAS_LABEL)
+        for k, b in getattr(self, "_biz_btns", {}).items():
+            b.config(fg=(TXT if k == mode else TXT_MUTED))
+        self._persist_simple()
 
     def _test_gemini(self):
         keys = resolve_gemini_keys(self._gemini_box_text())
@@ -3891,15 +3978,34 @@ class App:
         _s0 = load_settings()
 
         self._grouphdr(card, "🎯  TARGET", first=True)
-        self._label(card, "Area")
 
+        # ── Business toggle: Car / Duct (mutually exclusive) ──
+        self.business_var = tk.StringVar(
+            value=(_s0.get(f"business_mode{SUFFIX}") or _s0.get("business_mode") or "car").lower())
+        self._label(card, "Business  (area list)")
+        brow = tk.Frame(card, bg=CARD_BG); brow.pack(fill="x", pady=(2, 8))
+        self._biz_btns = {}
+        for _key, _txt in (("car", "🚗  Car detailing"), ("duct", "💨  Duct cleaning")):
+            b = tk.Radiobutton(
+                brow, text=_txt, value=_key, variable=self.business_var,
+                indicatoron=False, width=16, font=("Segoe UI Semibold", 9),
+                bg=INPUT_BG, fg=TXT_MUTED, selectcolor=FB_BLUE_D,
+                activebackground=BORDER, activeforeground=TXT,
+                relief="flat", bd=0, cursor="hand2", pady=6,
+                command=self._on_business_change)
+            b.pack(side="left", padx=(0, 6))
+            self._biz_btns[_key] = b
+        for _k, _b in self._biz_btns.items():
+            _b.config(fg=(TXT if _k == self.business_var.get() else TXT_MUTED))
+
+        self._label(card, "Area")
         self.city_var = tk.StringVar(
             value=_s0.get(f"city{SUFFIX}") or _s0.get("city") or ALL_AREAS_LABEL)
-        area_values = [ALL_AREAS_LABEL] + AREAS
-        area_combo = ttk.Combobox(card, textvariable=self.city_var,
-                                   values=area_values, font=("Segoe UI", 10),
+        self.area_combo = ttk.Combobox(card, textvariable=self.city_var,
+                                   values=[ALL_AREAS_LABEL] + areas_for(self.business_var.get()),
+                                   font=("Segoe UI", 10),
                                    state="normal", style="Dark.TCombobox")
-        area_combo.pack(fill="x", pady=(2, 10), ipady=3)
+        self.area_combo.pack(fill="x", pady=(2, 10), ipady=3)
 
         self._label(card, "Page Link (your Facebook page URL)")
         self.page_link_var = tk.StringVar(
@@ -4269,11 +4375,13 @@ class App:
                 "pace_enabled": bool(self.pace_var.get()),
                 "work_start":  self.work_start_var.get().strip() or "09:00",
                 "work_end":    self.work_end_var.get().strip() or "21:00",
+                "business_mode": self.business_var.get(),
             }
             self._persist_gemini()          # remember keys for next time
             s = load_settings()
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
+            s[f"business_mode{SUFFIX}"] = self.business_var.get()
             s[f"pace_enabled{SUFFIX}"] = bool(self.pace_var.get())
             s[f"work_start{SUFFIX}"] = self.work_start_var.get().strip() or "09:00"
             s[f"work_end{SUFFIX}"] = self.work_end_var.get().strip() or "21:00"
