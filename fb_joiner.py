@@ -50,6 +50,7 @@ SUFFIX   = "" if INSTANCE == "1" else f"_{INSTANCE}"
 # .update_ver ke monotonic integer (41, 42, …) se chalta hai — usse chhedo
 # mat, warna downgrade-protection toot jayegi.
 APP_VERSION = "4.1"
+BRAND       = "NexfourSolution"
 
 # ── App folder ───────────────────────────────────────────────
 # Sab files (browser profile, logs, screenshots, area cache) is folder
@@ -812,16 +813,16 @@ class HumanPacer:
         told = False
         while self.on and not self._in_window() and not stop_event.is_set():
             if not told:
-                send_ui("log", text=f"🕗 Working hours ({_fmt_hhmm(self.win_start)}"
-                                    f"–{_fmt_hhmm(self.win_end)}) ke bahar — "
-                                    f"window khulne ka intezaar…")
+                send_ui("log", text=f"🕗 Outside working hours "
+                                    f"({_fmt_hhmm(self.win_start)}–{_fmt_hhmm(self.win_end)}) "
+                                    f"— waiting for the window to open…")
                 told = True
             await _sleep_interruptible(180)
         if told and not stop_event.is_set():
-            send_ui("log", text="🕘 Working hours shuru — joining resume.")
+            send_ui("log", text="🕘 Working hours started — joining resumed.")
 
     async def pace(self, joined_today):
-        """Ek successful join ke BAAD call karo."""
+        """Call this AFTER a successful join."""
         if not self.on:
             await sleep(rand_delay(4, 9))
             return
@@ -1448,7 +1449,7 @@ async def handle_questions(page):
     except:
         still_open = False
     if still_open:
-        send_ui("log", text="   ↻ Form abhi tak khula — dobara bhar ke submit")
+        send_ui("log", text="   ↻ Form still open — refilling and submitting again")
         try:
             await tick_checkboxes(page)
         except Exception:
@@ -1509,19 +1510,28 @@ async def get_group_info(page):
 
 
 # Account-level block / checkpoint markers (page body text, lowercase)
+# NOTE: sirf woh phrases jo ASAL account-block/checkpoint pe hi aate hain.
+# "please try again later", "security check", "this feature isn't available"
+# jaise generic phrases JAAN-BOOJH ke nikaal diye — wo Facebook ke aam
+# temporary errors mein bhi aate hain (khaas kar VPS pe), aur bot ko bina
+# wajah rok dete the.
 ACCOUNT_BLOCK_MARKERS = [
-    "confirm your identity", "we need to confirm", "help us confirm",
-    "temporarily locked", "temporarily blocked", "temporarily restricted",
-    "your account has been temporarily", "you're restricted from",
-    "your account is restricted", "account has been disabled",
-    "you can't use facebook", "you cannot use facebook",
-    "this feature isn't available right now", "this feature isn’t available right now",
-    "you can't use this feature right now", "you cannot use this feature",
+    "confirm your identity", "we need to confirm your identity",
+    "help us confirm your identity",
+    "your account has been temporarily locked",
+    "your account has been temporarily restricted",
+    "your account has been disabled",
+    "we've temporarily blocked", "we have temporarily blocked",
+    "you're temporarily blocked", "you are temporarily blocked",
+    "you're restricted from joining", "you can't use facebook right now",
+    "you cannot use facebook right now",
     "you're doing that too much", "you’re doing that too much",
-    "we limit how often", "action blocked",
-    "unusual activity", "suspicious activity", "security check",
-    "solve this puzzle", "enter the code we", "enter security code",
-    "please try again later",
+    "you can't use this feature right now because",
+    "we limit how often you can post",
+    "we've restricted certain features", "we have restricted certain features",
+    "we detected unusual activity on your account",
+    "we noticed suspicious activity on your account",
+    "please solve this puzzle", "enter the security code we sent",
 ]
 # Sirf join karne ki limit — pending requests bharay hue
 PENDING_LIMIT_MARKERS = [
@@ -1556,6 +1566,28 @@ async def check_account_block(page, body_text: str = None) -> str:
 def check_pending_limit(body_text: str) -> bool:
     t = (body_text or "").lower()
     return any(m in t for m in PENDING_LIMIT_MARKERS)
+
+
+async def confirm_account_block(page, first_marker: str) -> str:
+    """
+    check_account_block ne kuch pakda — lekin bot ko rokne se PEHLE confirm
+    karo ke ye asal block hai, koi 2-second ka temporary Facebook error nahi.
+    ~15s ruk ke page reload kar ke dobara dekho. Marker phir bhi ho -> asal
+    block (reason return). Page theek ho gaya -> '' (bot chalta rahe).
+    """
+    try:
+        if page.url and "/checkpoint/" in page.url:
+            return first_marker            # checkpoint URL = pakka block
+        await sleep(15)
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+        await sleep(2)
+        again = await check_account_block(page)
+        return again or ""
+    except Exception:
+        return ""                           # shak ho to bot mat roko
 
 
 def _parse_count(s: str) -> int:
@@ -2199,12 +2231,15 @@ async def join_one_group(page, url, name, area, config):
             body_txt = ""
         blk = await check_account_block(page, body_txt)
         if blk:
-            send_ui("log", text=f"🚫 ACCOUNT BLOCK: '{blk}' — bot rok raha hai")
+            send_ui("log", text=f"⚠️ Possible block signal ('{blk}') — re-checking in 15s…")
+            blk = await confirm_account_block(page, blk)
+        if blk:
+            send_ui("log", text=f"🚫 ACCOUNT BLOCK confirmed: '{blk}' — stopping the bot")
             _a = config.get("_activity")
             if _a:
                 try:
                     _a.alert(f"ACCOUNT CHECKPOINT / BLOCK ({blk}) — bot stopped. "
-                             f"Is account ko kuch din araam do.")
+                             f"Give this account a few days of rest.")
                 except Exception:
                     pass
             try:
@@ -2314,12 +2349,12 @@ async def join_one_group(page, url, name, area, config):
         except Exception:
             after_txt = ""
         if check_pending_limit(after_txt):
-            send_ui("log", text="⏸️  Join-request limit reached (pending groups full) — bot rok raha hai")
+            send_ui("log", text="⏸️  Join-request limit reached (too many pending groups) — stopping the bot")
             _a = config.get("_activity")
             if _a:
                 try:
-                    _a.alert("JOIN-REQUEST LIMIT reached — bahut se pending requests hain. "
-                             "Bot stopped. Kuch requests approve/cancel hone do, phir chalao.")
+                    _a.alert("JOIN-REQUEST LIMIT reached — too many pending requests. "
+                             "Bot stopped. Let some requests get approved/cancelled, then start again.")
                 except Exception:
                     pass
             try:
@@ -2331,7 +2366,10 @@ async def join_one_group(page, url, name, area, config):
             return "blocked"
         blk2 = await check_account_block(page, after_txt)
         if blk2:
-            send_ui("log", text=f"🚫 ACCOUNT BLOCK after join: '{blk2}' — bot rok raha hai")
+            send_ui("log", text=f"⚠️ Possible block signal after join ('{blk2}') — re-checking…")
+            blk2 = await confirm_account_block(page, blk2)
+        if blk2:
+            send_ui("log", text=f"🚫 ACCOUNT BLOCK after join confirmed: '{blk2}' — stopping the bot")
             _a = config.get("_activity")
             if _a:
                 try:
@@ -2664,8 +2702,8 @@ async def playwright_main(config):
     _session_start = joined_today          # is run ka apna count nikalne ke liye
     skipped_today = 0
     if joined_today:
-        send_ui("log", text=f"↻ Aaj ab tak {joined_today} group join ho chuke — "
-                            f"wahin se continue (limit {config.get('daily_limit', 250)}).")
+        send_ui("log", text=f"↻ {joined_today} groups already joined today — "
+                            f"continuing from here (limit {config.get('daily_limit', 250)}).")
         send_ui("joined", count=joined_today)
 
     async with async_playwright() as p:
@@ -2695,9 +2733,9 @@ async def playwright_main(config):
             try:
                 await page.wait_for_selector('[role="navigation"]', timeout=180000)
             except:
-                send_ui("log", text="❌ Timeout — press START again")
+                send_ui("log", text="❌ Login timed out — log in to Facebook in the browser, then press START again.")
+                config["_end_reason"] = "login_timeout"
                 await ctx.close()
-                send_ui("stopped")
                 return
             await sleep(3)
             send_ui("log", text="✅ Logged in! Session saved — next time it's automatic.")
@@ -2708,9 +2746,9 @@ async def playwright_main(config):
         page_name = config.get("page_name") or DEFAULT_PAGE_NAME
         page_link = (config.get("page_link") or DEFAULT_PAGE_LINK).strip()
         if not page_name and not page_link:
-            send_ui("log", text="❌ Page Link is empty — never joining from personal profile. Stopping.")
+            send_ui("log", text="❌ Page Link is empty — enter your Facebook Page link, then press START.")
+            config["_end_reason"] = "no_page_link"
             await ctx.close()
-            send_ui("stopped")
             return
 
         send_ui("log", text=f"🔄 Switching to page '{page_name or page_link}'...")
@@ -2746,11 +2784,10 @@ async def playwright_main(config):
                     except Exception:
                         pass
 
-                # Har ~10 cycle (~20 min): SIRF file-tamper check (koi version
-                # update mid-session NAHI — warna chal rahi joining bina error
-                # ke silently ruk jaati thi). Sirf tab rukta hai jab koi file
-                # sach mein tamper hui ho — aur tab clear Discord alert bhi
-                # jata hai. Blocking network call hai — thread mein.
+                # Har ~10 cycle (~20 min): file-tamper check. Ab bot ko ROKTA
+                # NAHI — sirf Discord alert + file ko chup-chaap original se
+                # heal kar deta hai (heal disk par ho jata hai, agli restart
+                # par apply). Isse chalti joining bina wajah nahi rukti.
                 _integrity_ctr["n"] += 1
                 if _integrity_ctr["n"] % 10 == 0:
                     try:
@@ -2759,7 +2796,8 @@ async def playwright_main(config):
                         def _integrity_alert(msg):
                             if act:
                                 try:
-                                    act.alert(msg)
+                                    act.alert(msg + " (file restored to the verified "
+                                              "original — will apply on next restart)")
                                 except Exception:
                                     pass
 
@@ -2768,20 +2806,20 @@ async def playwright_main(config):
                             getattr(lic, "UPDATE_URL", ""), APP_DIR,
                             print, _integrity_alert)
                         if tampered:
-                            send_ui("log", text=f"🚨 File tampering detected ({', '.join(tampered)}) "
-                                                 f"— bot is stopping. Restart to reload verified files.")
-                            config["_end_reason"] = "file_tamper"
-                            stop_event.set()
-                            return
+                            send_ui("log", text=f"🚨 File change detected ({', '.join(tampered)}) "
+                                                 f"— alert sent + verified original restored. "
+                                                 f"Joining continues.")
                     except Exception:
                         pass
                 # account block periodically bhi check karo (current page)
                 try:
                     blk = await check_account_block(page)
+                    if blk:
+                        blk = await confirm_account_block(page, blk)   # 15s re-check
                 except Exception:
                     blk = ""
                 if blk:
-                    send_ui("log", text=f"🚫 ACCOUNT BLOCK (watchdog): '{blk}' — stopping")
+                    send_ui("log", text=f"🚫 ACCOUNT BLOCK (watchdog, confirmed): '{blk}' — stopping")
                     if act:
                         try:
                             act.alert(f"ACCOUNT CHECKPOINT / BLOCK ({blk}) — bot stopped.")
@@ -2806,7 +2844,7 @@ async def playwright_main(config):
                 except Exception:
                     _sok, _smsg = True, ""
                 if not _sok:
-                    send_ui("log", text=f"⏸️  {_smsg} — bot ruk raha hai.")
+                    send_ui("log", text=f"⏸️  {_smsg} — stopping the bot.")
                     if act:
                         try:
                             act.alert(f"Bot admin-paused ({_smsg}) — stopped.")
@@ -2820,9 +2858,9 @@ async def playwright_main(config):
 
         pacer = HumanPacer(config)
         if pacer.on:
-            send_ui("log", text=f"🚶 Human pacing ON — joins din bhar phaile "
+            send_ui("log", text=f"🚶 Human pacing ON — joins spread across the day "
                                 f"({_fmt_hhmm(pacer.win_start)}–{_fmt_hhmm(pacer.win_end)}), "
-                                f"beech mein breaks. (Account safety)")
+                                f"with breaks. (Account safety)")
         else:
             send_ui("log", text="⚡ Human pacing OFF — fixed delays "
                                 f"({config.get('delay_min')}–{config.get('delay_max')}s).")
@@ -2892,12 +2930,13 @@ async def playwright_main(config):
             config["_end_reason"] = _GEMINI_DEAD_REASON
         elif config.get("_end_reason") not in ("license_expired", "account_blocked",
                                                 "pending_limit", "setup_failed",
-                                                "file_tamper", "service_paused"):
+                                                "file_tamper", "service_paused",
+                                                "login_timeout", "no_page_link"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         _this_run = joined_today - _session_start
         send_ui("log", text=f"\n🎉 Done! This run: joined {_this_run} groups, skipped {skipped_today}. "
-                            f"Aaj total: {joined_today}/{config.get('daily_limit', 250)}.")
+                            f"Today's total: {joined_today}/{config.get('daily_limit', 250)}.")
         send_ui("log", text="✅ Session complete!")
         await ctx.close()
         send_ui("stopped")
@@ -2906,7 +2945,7 @@ async def _login_browser_main():
     """Sirf browser kholo Facebook pe — user login karega, joining kuch
     nahi. User window band karega -> session save -> ho gaya."""
     async with async_playwright() as p:
-        send_ui("log", text="🌐 Browser khul raha hai — Facebook pe login karo…")
+        send_ui("log", text="🌐 Opening browser — log in to Facebook…")
         ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
                                extra_args=["--start-maximized"])
         closed = {"v": False}
@@ -2917,7 +2956,7 @@ async def _login_browser_main():
                             timeout=20000)
         except Exception:
             pass
-        send_ui("log", text="   👉 Login karo, phir browser window BAND kar do (ya STOP dabao).")
+        send_ui("log", text="   👉 Log in, then CLOSE the browser window (or press STOP).")
         # user ke band karne / stop_event tak intezar
         while not closed["v"] and not stop_event.is_set():
             await sleep(1)
@@ -2937,10 +2976,10 @@ async def _login_browser_main():
             await ctx.close()
         except Exception:
             pass
-        send_ui("log", text=("✅ Login session save ho gaya — ab START dabao."
+        send_ui("log", text=("✅ Login session saved — you can press START now."
                              if logged_in else
-                             "ℹ️ Browser band. Agar login nahi hua to dobara "
-                             "'Open browser' dabao."))
+                             "ℹ️ Browser closed. If you didn't log in, click "
+                             "'Open browser' again."))
     send_ui("login_done")
 
 
@@ -2956,7 +2995,7 @@ async def _logout_main():
     """Facebook session (cookies + local storage) clear karo — account
     suspend/checkpoint hone par employee khud yahan se logout kar sake,
     dobara login karne ke liye. Browser dikhta nahi (background mein)."""
-    send_ui("log", text="🚪 Facebook se logout ho raha hai…")
+    send_ui("log", text="🚪 Logging out of Facebook…")
     try:
         async with async_playwright() as p:
             ctx = await _launch_ctx(p, headless=True)
@@ -2981,11 +3020,11 @@ async def _logout_main():
             except Exception:
                 pass
             await ctx.close()
-        send_ui("log", text=("✅ Logout ho gaya — session clear. Dobara login "
-                             "karne ke liye 'Open browser & log in' dabao."
+        send_ui("log", text=("✅ Logged out — session cleared. Click 'Open browser & "
+                             "log in' to sign in again."
                              if logged_out else
-                             "⚠️ Logout ki koshish hui lekin verify nahi ho saka "
-                             "— 'Open browser' se check kar lo."))
+                             "⚠️ Tried to log out but couldn't verify it — check with "
+                             "'Open browser'."))
     except Exception as e:
         send_ui("log", text=f"logout error: {str(e)[:80]}")
     send_ui("logout_done")
@@ -2999,12 +3038,147 @@ def run_logout_browser():
         send_ui("logout_done")
 
 
+# ── Pre-flight check ─────────────────────────────────────────
+async def _preflight_main(config):
+    """START se pehle sab kuch verify: license, internet, admin switch,
+    Gemini keys, Facebook login, page. Log mein green/red report."""
+    send_ui("log", text="\n🔎 Running pre-flight check… (this takes a moment)")
+    rows = []   # (label, "ok"/"warn"/"fail", detail)
+
+    # 1. License
+    try:
+        i = lic.validate_key(lic.load_active_key())
+        if i.get("ok"):
+            rows.append(("License", "ok", f"valid · {i.get('time_left', '')} left"))
+        else:
+            rows.append(("License", "fail", i.get("error", "invalid")))
+    except Exception as e:
+        rows.append(("License", "fail", str(e)[:60]))
+
+    # 2. Internet
+    def _net():
+        import urllib.request
+        for u in ("https://www.facebook.com/robots.txt",
+                  "https://raw.githubusercontent.com/"):
+            try:
+                urllib.request.urlopen(urllib.request.Request(
+                    u, headers={"User-Agent": _STEALTH_UA}), timeout=8).read(64)
+                return True
+            except Exception:
+                continue
+        return False
+    _ok = await asyncio.to_thread(_net)
+    rows.append(("Internet", "ok" if _ok else "fail",
+                 "connected" if _ok else "no connection — check network"))
+
+    # 3. Admin remote switch
+    try:
+        import updater as _u
+        _sok, _sm = await asyncio.to_thread(
+            _u.service_allows, getattr(lic, "UPDATE_URL", ""), config.get("employee", ""))
+        rows.append(("Admin switch", "ok" if _sok else "fail",
+                     "allowed" if _sok else (_sm or "paused by the administrator")))
+    except Exception:
+        rows.append(("Admin switch", "warn", "could not check"))
+
+    # 4. Gemini keys
+    keys = list(config.get("gemini_keys", []) or [])
+    if not keys:
+        rows.append(("Gemini keys", "warn", "none set — template answers will be used"))
+    else:
+        def _gk():
+            import urllib.request
+            good = 0
+            for k in keys:
+                try:
+                    urllib.request.urlopen(urllib.request.Request(
+                        "https://generativelanguage.googleapis.com/v1beta/models",
+                        headers={"x-goog-api-key": k}), timeout=12).read(64)
+                    good += 1
+                except Exception:
+                    pass
+            return good
+        g = await asyncio.to_thread(_gk)
+        rows.append(("Gemini keys", "ok" if g == len(keys) else ("warn" if g else "fail"),
+                     f"{g}/{len(keys)} valid"))
+
+    # 5. Facebook login + page (headless browser)
+    fb_ok, page_ok, blk = False, None, ""
+    try:
+        async with async_playwright() as p:
+            ctx = await _launch_ctx(p, headless=True)
+            pg = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            try:
+                await pg.goto("https://www.facebook.com/", wait_until="domcontentloaded",
+                              timeout=25000)
+                await sleep(2)
+            except Exception:
+                pass
+            body = ""
+            try:
+                body = await pg.inner_text("body")
+            except Exception:
+                pass
+            try:
+                blk = await check_account_block(pg, body)
+            except Exception:
+                blk = ""
+            try:
+                fb_ok = ("/login" not in (pg.url or "").lower()) and (
+                    await pg.locator('[role="navigation"]').count() > 0
+                    or await pg.locator('[role="feed"]').count() > 0)
+            except Exception:
+                fb_ok = False
+            plink = (config.get("page_link") or "").strip()
+            if fb_ok and plink and not blk:
+                try:
+                    await pg.goto(plink, wait_until="domcontentloaded", timeout=25000)
+                    await sleep(2)
+                    page_ok = "/login" not in (pg.url or "").lower()
+                except Exception:
+                    page_ok = False
+            await ctx.close()
+    except Exception as e:
+        rows.append(("Browser", "fail", str(e)[:60]))
+
+    if blk and "logged out" not in blk:
+        rows.append(("Facebook", "fail", f"checkpoint/block: {blk} — rest this account"))
+    else:
+        rows.append(("Facebook login", "ok" if fb_ok else "fail",
+                     "logged in" if fb_ok else "NOT logged in — click 'Open browser & log in'"))
+    if page_ok is not None:
+        rows.append(("Page link", "ok" if page_ok else "warn",
+                     "opens fine" if page_ok else "won't open — check the URL / admin access"))
+
+    ic = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+    for lbl, st, dt in rows:
+        send_ui("log", text=f"   {ic[st]} {lbl}: {dt}")
+    fails = [r for r in rows if r[1] == "fail"]
+    warns = [r for r in rows if r[1] == "warn"]
+    if fails:
+        send_ui("log", text=f"■ PRE-FLIGHT: {len(fails)} FAIL — fix these, then START. "
+                            f"📞 If unsure, Contact {BRAND}.")
+    elif warns:
+        send_ui("log", text=f"■ PRE-FLIGHT: all OK ({len(warns)} warning) — you can START.")
+    else:
+        send_ui("log", text="■ PRE-FLIGHT: all GREEN ✅ — go ahead and START.")
+    send_ui("preflight_done")
+
+
+def run_preflight(config):
+    try:
+        asyncio.run(_preflight_main(config))
+    except Exception as e:
+        send_ui("log", text=f"pre-flight error: {str(e)[:80]}")
+        send_ui("preflight_done")
+
+
 def run_playwright(config):
     # ── License gate — the bot does not run without a valid key ──
     info = lic.validate_key(config.get("license_key", ""))
     if not info["ok"]:
         send_ui("log", text=f"⛔ License invalid: {info['error']}")
-        send_ui("log", text="   Activate a valid key, then press START.")
+        send_ui("log", text=f"   Activate a new key, then press START.  📞 Contact {BRAND}")
         send_ui("stopped")
         return
 
@@ -3017,8 +3191,8 @@ def run_playwright(config):
         _sok, _smsg = True, ""
     if not _sok:
         send_ui("log", text=f"⏸️  {_smsg}")
-        send_ui("log", text="   Administrator ne is bot ko rok rakha hai — "
-                            "baad mein START karo (ya admin se poochho).")
+        send_ui("log", text=f"   The administrator has paused this bot — try START later.  "
+                            f"📞 Contact {BRAND}")
         send_ui("stopped")
         return
 
@@ -3074,7 +3248,7 @@ def run_playwright(config):
     MAX_RESTARTS = 6
     _terminal = ("license_expired", "account_blocked", "pending_limit",
                  "setup_failed", "file_tamper", "gemini_keys_failed",
-                 "service_paused")
+                 "service_paused", "login_timeout", "no_page_link")
     restarts = 0
     while True:
         try:
@@ -3096,27 +3270,30 @@ def run_playwright(config):
 
             # User ne STOP dabaya / terminal reason -> restart nahi
             if stop_event.is_set() or config.get("_end_reason") in _terminal:
-                send_ui("log", text=f"❌ Error: {str(e)[:120]}")
-                send_ui("log", text=f"   (Details: error_log{SUFFIX}.txt)")
+                if config.get("_end_reason", "completed") == "completed":
+                    config["_end_reason"] = "user_stop" if stop_event.is_set() else "error"
+                if not stop_event.is_set():
+                    send_ui("log", text=f"❌ Error: {str(e)[:120]}  (error_log{SUFFIX}.txt)")
                 break
 
             restarts += 1
             if restarts > MAX_RESTARTS:
-                send_ui("log", text=f"❌ {MAX_RESTARTS} baar crash hua — ab ruk raha hoon. "
-                                    f"error_log{SUFFIX}.txt dekho / bot dobara START karo.")
+                config["_end_reason"] = "error"
+                send_ui("log", text=f"❌ Crashed {MAX_RESTARTS} times — giving up now. "
+                                    f"Please press START again.  📞 Contact {BRAND}")
                 try:
                     _a = config.get("_activity")
                     if _a:
-                        _a.alert(f"Bot {MAX_RESTARTS} baar crash hua aur restart fail — "
-                                 f"is profile ko manually START karna hoga.")
+                        _a.alert(f"Bot crashed {MAX_RESTARTS} times and auto-restart failed — "
+                                 f"this profile needs a manual START.  Contact {BRAND}")
                 except Exception:
                     pass
                 break
 
             wait = min(60, 10 * restarts)
-            send_ui("log", text=f"⚠️ Bot crash hua — {wait}s baad KHUD restart ho raha hai "
-                                f"(koshish {restarts}/{MAX_RESTARTS}). Aaj ke joins safe hain, "
-                                f"wahin se continue hoga.")
+            send_ui("log", text=f"⚠️ Bot crashed — restarting itself in {wait}s "
+                                f"(attempt {restarts}/{MAX_RESTARTS}). Today's joins are safe, "
+                                f"it will continue from there.")
             # Chromium ke stale lock hata do (unclean exit ke baad relaunch
             # rok sakte hain)
             for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
@@ -3135,29 +3312,73 @@ def run_playwright(config):
                 pass
             continue
 
+    # ── Always show a CLEAR stop reason (UI + Discord) so it never looks "random" ──
+    _reason = config.get("_end_reason", "completed")
+    _RMAP = {
+        "completed":        "✅ Daily target reached / all done — normal stop.",
+        "user_stop":        "⏹️ You pressed STOP.",
+        "license_expired":  "⛔ License key expired/invalid — activate a new key.",
+        "account_blocked":  "🚫 Facebook checkpoint/block on this account — give this ID a few days of rest.",
+        "pending_limit":    "⏸️ Facebook applied a join-request limit (too many pending) — get some approved/cancelled.",
+        "gemini_keys_failed":"⚠️ All Gemini API keys are down — need new keys, or try again later.",
+        "file_tamper":      "🚨 A bot file was changed — verified files will reload on restart.",
+        "service_paused":   "⏸️ The administrator has paused the bot.",
+        "setup_failed":     "❌ Could not switch to the Page — check the Page Link / admin access.",
+        "no_page_link":     "❌ Page Link is empty — enter your Facebook Page link.",
+        "login_timeout":    "❌ Login timed out — log in to Facebook in the browser, then START.",
+        "error":            "❌ Bot crashed (details in error_log).",
+    }
+    _normal = ("completed", "user_stop")
+    _msg = _RMAP.get(_reason, f"Stopped (reason: {_reason}).")
+    if _reason not in _normal:
+        _msg += f"\n   📞  If it doesn't resolve → Contact {BRAND}"
+    send_ui("log", text=f"\n■ BOT STOPPED — {_msg}")
+    if _reason not in _normal:
+        try:
+            _a = config.get("_activity")
+            if _a:
+                _a.alert(f"BOT STOPPED ({_reason}) — {_RMAP.get(_reason, _reason)}  "
+                         f"·  Contact {BRAND}")
+        except Exception:
+            pass
+
     send_ui("stopped")
 
 # ── Tkinter UI ────────────────────────────────────────────────
 
-BG        = "#0f1117"   # window background (dark)
-CARD_BG   = "#181b23"   # cards
-BORDER    = "#262b38"   # borders
-INPUT_BG  = "#20242f"   # entry fields
-LOG_BG    = "#0b0d12"   # console
-TXT       = "#e8eaf0"   # primary text
-TXT_MUTED = "#8b90a0"   # secondary text
-FB_BLUE   = "#3b82f6"   # accent
-FB_BLUE_D = "#2563eb"
-GREEN     = "#22c55e"
-GREEN_BG  = "#14231a"
-ORANGE    = "#f59e0b"
-ORANGE_BG = "#26200f"
-RED       = "#ef4444"
+BG        = "#0c0e13"   # window background (deep dark)
+CARD_BG   = "#161922"   # cards
+CARD_HI   = "#1c202b"   # elevated / hover
+BORDER    = "#2a2f3d"   # borders
+INPUT_BG  = "#1e222c"   # entry fields
+LOG_BG    = "#0a0c11"   # console
+TXT       = "#eef1f6"   # primary text
+TXT_MUTED = "#9aa0b0"   # secondary text
+TXT_DIM   = "#5b6070"   # faint
+FB_BLUE   = "#4c8dff"   # accent
+FB_BLUE_D = "#356fe0"
+GREEN     = "#26d07c"
+GREEN_BG  = "#12241b"
+GREEN_D   = "#1fae68"
+ORANGE    = "#f5a623"
+ORANGE_BG = "#271f10"
+RED       = "#ff5c5c"
+
+# ── Typography scale ────────────────────────────────────────
+F_H1    = ("Segoe UI Semibold", 15)
+F_H2    = ("Segoe UI Semibold", 11)
+F_LABEL = ("Segoe UI", 8, "bold")
+F_BODY  = ("Segoe UI", 9)
+F_SMALL = ("Segoe UI", 8)
+F_TINY  = ("Segoe UI", 7)
+F_BIG   = ("Segoe UI", 30, "bold")
+F_MONO  = ("Consolas", 9)
 
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"FB Group Joiner  v{APP_VERSION}  —  Account {INSTANCE}   ·   build {_build_no()}")
+        self.root.title(f"FB Group Joiner  v{APP_VERSION}  —  Account {INSTANCE}   ·   "
+                        f"Tool by {BRAND}   ·   build {_build_no()}")
         # 2-column layout. Left settings scroll karte hain aur START button
         # left column ke neeche PINNED hai — isliye chhoti screen par bhi
         # START hamesha nazar aata hai.
@@ -3171,6 +3392,8 @@ class App:
         self.running        = False
         self._login_open    = False
         self._logout_open   = False
+        self._preflight_open = False
+        self._run_start     = None
         self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
 
         self._style()
@@ -3492,7 +3715,7 @@ class App:
         style.configure("FB.Horizontal.TProgressbar",
                         troughcolor=INPUT_BG, bordercolor=BORDER,
                         background=GREEN, lightcolor=GREEN, darkcolor=GREEN,
-                        thickness=8)
+                        thickness=14)
         self.root.option_add("*TCombobox*Listbox.background", INPUT_BG)
         self.root.option_add("*TCombobox*Listbox.foreground", TXT)
         self.root.option_add("*TCombobox*Listbox.selectBackground", FB_BLUE)
@@ -3511,6 +3734,13 @@ class App:
         tk.Label(parent, text=text, bg=CARD_BG, fg=TXT_MUTED,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 8))
 
+    def _grouphdr(self, parent, text, first=False):
+        """Settings ke andar chhota section header + divider — visual grouping."""
+        tk.Frame(parent, bg=BORDER, height=1).pack(
+            fill="x", pady=(4 if first else 14, 8))
+        tk.Label(parent, text=text, bg=CARD_BG, fg=FB_BLUE,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 6))
+
     def _entry(self, parent, var, **pack_opts):
         e = tk.Entry(parent, textvariable=var, font=("Segoe UI", 11),
                      bg=INPUT_BG, fg=TXT, insertbackground=TXT,
@@ -3524,16 +3754,41 @@ class App:
         hdr = tk.Frame(self.root, bg=CARD_BG)
         hdr.pack(fill="x")
         row = tk.Frame(hdr, bg=CARD_BG)
-        row.pack(fill="x", padx=16, pady=(14, 2))
-        tk.Label(row, text="FB Group Joiner", bg=CARD_BG, fg=TXT,
-                 font=("Segoe UI", 16, "bold")).pack(side="left")
-        tk.Label(row, text=f"v{APP_VERSION}", bg=CARD_BG, fg=TXT_MUTED,
-                 font=("Segoe UI", 10)).pack(side="left", padx=(8, 0))
-        tk.Label(row, text=f"  ACCOUNT {INSTANCE}  ", bg=FB_BLUE, fg="white",
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(10, 0), pady=4)
+        row.pack(fill="x", padx=18, pady=(14, 4))
+
+        # logo mark
+        logo = tk.Label(row, text="FB", bg=FB_BLUE, fg="white",
+                        font=("Segoe UI Black", 12), width=3, pady=3)
+        logo.pack(side="left")
+        titlebox = tk.Frame(row, bg=CARD_BG)
+        titlebox.pack(side="left", padx=(10, 0))
+        tk.Label(titlebox, text="FB Group Joiner", bg=CARD_BG, fg=TXT,
+                 font=F_H1).pack(anchor="w")
+        tk.Label(titlebox, text=f"v{APP_VERSION}   ·   Tool by {BRAND}",
+                 bg=CARD_BG, fg=TXT_DIM, font=F_TINY).pack(anchor="w")
+
+        tk.Label(row, text=f"ACCOUNT {INSTANCE}", bg=INPUT_BG, fg=FB_BLUE,
+                 font=("Segoe UI Semibold", 8), padx=10, pady=4).pack(side="right")
+
         self.status_var = tk.StringVar(value="●  Idle — press START to begin")
-        tk.Label(hdr, textvariable=self.status_var, bg=CARD_BG, fg=TXT_MUTED,
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=16, pady=(0, 4))
+        self.status_lbl = tk.Label(hdr, textvariable=self.status_var, bg=CARD_BG,
+                                   fg=TXT_MUTED, font=("Segoe UI Semibold", 9), anchor="w")
+        self.status_lbl.pack(fill="x", padx=18, pady=(0, 6))
+
+        def _recolor_status(*_a):
+            t = self.status_var.get().lower()
+            if any(k in t for k in ("running", "checking", "open")):
+                c = GREEN
+            elif any(k in t for k in ("error", "invalid", "block", "expired",
+                                      "fail", "paused", "stopping")):
+                c = RED
+            else:
+                c = TXT_MUTED
+            try:
+                self.status_lbl.config(fg=c)
+            except Exception:
+                pass
+        self.status_var.trace_add("write", _recolor_status)
 
         # ── License bar ──────────────────────────────────────
         self.lic_var = tk.StringVar(value="")
@@ -3575,30 +3830,41 @@ class App:
         right = tk.Frame(main, bg=BG)
         right.grid(row=0, column=1, sticky="nsew")
 
-        # ══ LEFT COLUMN — START (pinned) + scrollable Settings ═══
+        # ══ LEFT COLUMN — primary START (pinned) + secondary buttons ═══
         self.btn = tk.Button(left, text="▶   START",
-                             bg=GREEN, fg="white",
-                             font=("Segoe UI", 13, "bold"),
-                             relief="flat", cursor="hand2",
-                             activebackground="#16a34a", activeforeground="white",
-                             command=self._toggle, pady=12)
-        self.btn.pack(side="bottom", fill="x", pady=(8, 0))
+                             bg=GREEN, fg="#08130c",
+                             font=("Segoe UI Semibold", 14),
+                             relief="flat", cursor="hand2", bd=0,
+                             activebackground=GREEN_D, activeforeground="#08130c",
+                             command=self._toggle, pady=13)
+        self.btn.pack(side="bottom", fill="x", pady=(10, 0))
 
-        # Account row: login (browser kholo) + logout (session clear —
-        # account suspend/checkpoint ho to employee khud yahan se karega)
+        # Secondary: pre-flight check (outlined)
+        preflight_row = tk.Frame(left, bg=BG)
+        preflight_row.pack(side="bottom", fill="x", pady=(6, 0))
+        self.preflight_btn = tk.Button(
+            preflight_row, text="🔎   Pre-flight check",
+            bg=CARD_BG, fg=FB_BLUE, font=("Segoe UI Semibold", 9),
+            relief="flat", cursor="hand2", bd=0,
+            highlightthickness=1, highlightbackground=FB_BLUE_D, highlightcolor=FB_BLUE_D,
+            activebackground=CARD_HI, activeforeground=FB_BLUE,
+            command=self._do_preflight, pady=7)
+        self.preflight_btn.pack(fill="x")
+
+        # Tertiary: login / logout (ghost)
         acct_row = tk.Frame(left, bg=BG)
-        acct_row.pack(side="bottom", fill="x", pady=(8, 0))
+        acct_row.pack(side="bottom", fill="x", pady=(6, 0))
         self.logout_btn = tk.Button(acct_row, text="🚪  Log out",
-                                    bg=INPUT_BG, fg=TXT_MUTED, font=("Segoe UI", 9),
-                                    relief="flat", cursor="hand2",
-                                    activebackground=BORDER, activeforeground=TXT,
-                                    command=self._do_logout, pady=6)
+                                    bg=BG, fg=TXT_DIM, font=F_SMALL,
+                                    relief="flat", cursor="hand2", bd=0,
+                                    activebackground=CARD_BG, activeforeground=TXT_MUTED,
+                                    command=self._do_logout, pady=5)
         self.logout_btn.pack(side="left", padx=(0, 6))
-        self.login_btn = tk.Button(acct_row, text="🔓  Open browser & log in to Facebook",
-                                   bg=INPUT_BG, fg=TXT, font=("Segoe UI", 9),
-                                   relief="flat", cursor="hand2",
-                                   activebackground=BORDER, activeforeground=TXT,
-                                   command=self._open_login, pady=6)
+        self.login_btn = tk.Button(acct_row, text="🔓  Log in to Facebook",
+                                   bg=BG, fg=TXT_MUTED, font=F_SMALL,
+                                   relief="flat", cursor="hand2", bd=0,
+                                   activebackground=CARD_BG, activeforeground=TXT,
+                                   command=self._open_login, pady=5)
         self.login_btn.pack(side="left", fill="x", expand=True)
 
         _sc = tk.Frame(left, bg=BG)
@@ -3622,10 +3888,10 @@ class App:
             _w.bind("<Enter>", lambda e: _canvas.bind_all("<MouseWheel>", _wheel))
             _w.bind("<Leave>", lambda e: _canvas.unbind_all("<MouseWheel>"))
 
-        self._section_title(card, "SETTINGS")
-
-        self._label(card, "Area")
         _s0 = load_settings()
+
+        self._grouphdr(card, "🎯  TARGET", first=True)
+        self._label(card, "Area")
 
         self.city_var = tk.StringVar(
             value=_s0.get(f"city{SUFFIX}") or _s0.get("city") or ALL_AREAS_LABEL)
@@ -3643,6 +3909,7 @@ class App:
         self.page_link_var.trace_add("write", lambda *a: self._persist_simple())
         self.city_var.trace_add("write", lambda *a: self._persist_simple())
 
+        self._grouphdr(card, "⏱  LIMITS & PACING")
         row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
         col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 5))
         col2 = tk.Frame(row1, bg=CARD_BG); col2.pack(side="left", expand=True, fill="x")
@@ -3692,8 +3959,8 @@ class App:
         self._entry(wc2, self.work_end_var, pady=(2, 4))
         self.work_start_var.trace_add("write", lambda *a: self._persist_simple())
         self.work_end_var.trace_add("write", lambda *a: self._persist_simple())
-        tk.Label(card, text="Pacing ON = 'Delay Min/Max' ignore; joins din bhar "
-                            "phaila ke honge. Same HH:MM dono = 24h.",
+        tk.Label(card, text="Pacing ON = 'Delay Min/Max' ignored; joins are spread "
+                            "across the day. Same HH:MM for both = 24h.",
                  bg=CARD_BG, fg=TXT_MUTED, font=("Segoe UI", 7),
                  wraplength=380, justify="left").pack(anchor="w", pady=(0, 2))
 
@@ -3711,6 +3978,7 @@ class App:
         self.mix_lbl.pack(side="left", padx=(8, 0))
         e.bind("<KeyRelease>", lambda ev: self._refresh_mix_lbl())
 
+        self._grouphdr(card, "🛡  SAFETY FILTERS")
         self.skip_nopost_var = tk.BooleanVar(value=bool(_s0.get("skip_no_post", True)))
         tk.Checkbutton(card, text="Skip groups where members can't post (admin-only)",
                        variable=self.skip_nopost_var, bg=CARD_BG, fg=TXT_MUTED,
@@ -3759,6 +4027,7 @@ class App:
                  justify="left").pack(anchor="w", pady=(6, 4))
 
         # ── Gemini API keys — AI answers (auto-loaded from gemini_keys.txt) ──
+        self._grouphdr(card, "🤖  AI ANSWERS  (optional)")
         self._label(card, "Gemini API Keys  —  one per line  ·  auto-loads gemini_keys.txt")
         grow = tk.Frame(card, bg=CARD_BG)
         grow.pack(fill="x", pady=(2, 2))
@@ -3784,53 +4053,58 @@ class App:
 
         # (START button is pinned at the bottom of the left column — created above)
 
-        # ══ RIGHT COLUMN — Stats / Progress / Activity / Log ═
-        stats = tk.Frame(right, bg=BG)
-        stats.pack(fill="x")
-        stat_items = [
-            (0, GREEN,  GREEN_BG,  "JOINED THIS SESSION",  "joined_lbl"),
-            (1, ORANGE, ORANGE_BG, "SKIPPED THIS SESSION", "skipped_lbl"),
-        ]
-        for col, color, bg_color, label, attr in stat_items:
-            f = tk.Frame(stats, bg=bg_color, padx=12, pady=8,
+        # ══ RIGHT COLUMN — TODAY summary card + Activity + Log ═
+        today = tk.Frame(right, bg=CARD_BG, padx=18, pady=16,
                          highlightbackground=BORDER, highlightthickness=1)
-            f.grid(row=0, column=col, sticky="nsew", padx=(0, 6) if col == 0 else 0)
-            stats.columnconfigure(col, weight=1)
-            v = self._tvar(attr)
-            v.set("0")
-            tk.Label(f, textvariable=v, font=("Segoe UI", 22, "bold"),
-                     fg=color, bg=bg_color).pack()
-            tk.Label(f, text=label, font=("Segoe UI", 8, "bold"),
-                     fg=TXT_MUTED, bg=bg_color).pack()
+        today.pack(fill="x")
 
-        pb_frame = tk.Frame(right, bg=BG)
-        pb_frame.pack(fill="x", pady=(10, 0))
-        self.progress = ttk.Progressbar(pb_frame, maximum=250, mode="determinate",
-                                         style="FB.Horizontal.TProgressbar")
-        self.progress.pack(fill="x")
-        self.progress_lbl_var = tk.StringVar(value="0 / 250 joined today")
-        tk.Label(pb_frame, textvariable=self.progress_lbl_var,
-                 bg=BG, font=("Segoe UI", 9), fg=TXT_MUTED).pack(pady=(3, 0))
+        trow = tk.Frame(today, bg=CARD_BG); trow.pack(fill="x")
+        tk.Label(trow, text="TODAY", bg=CARD_BG, fg=TXT_MUTED,
+                 font=F_LABEL).pack(side="left")
+        self.runtime_var = tk.StringVar(value="")
+        tk.Label(trow, textvariable=self.runtime_var, bg=CARD_BG, fg=TXT_DIM,
+                 font=F_SMALL).pack(side="right")
 
-        now_card = tk.Frame(right, bg=CARD_BG, padx=14, pady=10,
+        numrow = tk.Frame(today, bg=CARD_BG); numrow.pack(fill="x", pady=(8, 6))
+        self.joined_lbl_var = tk.StringVar(value="0")
+        tk.Label(numrow, textvariable=self.joined_lbl_var, bg=CARD_BG, fg=GREEN,
+                 font=F_BIG).pack(side="left")
+        self.progress_lbl_var = tk.StringVar(value="/ 250  ·  joined")
+        tk.Label(numrow, textvariable=self.progress_lbl_var, bg=CARD_BG, fg=TXT_MUTED,
+                 font=F_BODY).pack(side="left", anchor="s", pady=(0, 8), padx=(8, 0))
+
+        self.progress = ttk.Progressbar(today, maximum=250, mode="determinate",
+                                        style="FB.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(2, 10))
+
+        srow = tk.Frame(today, bg=CARD_BG); srow.pack(fill="x")
+        self.skipped_lbl_var = tk.StringVar(value="0")
+        tk.Label(srow, text="⏭  skipped this run: ", bg=CARD_BG, fg=TXT_DIM,
+                 font=F_SMALL).pack(side="left")
+        tk.Label(srow, textvariable=self.skipped_lbl_var, bg=CARD_BG, fg=ORANGE,
+                 font=("Segoe UI Semibold", 9)).pack(side="left")
+
+        # Current activity
+        now_card = tk.Frame(right, bg=CARD_BG, padx=18, pady=12,
                             highlightbackground=BORDER, highlightthickness=1)
         now_card.pack(fill="x", pady=(10, 0))
-        self._section_title(now_card, "CURRENT ACTIVITY")
+        tk.Label(now_card, text="CURRENT ACTIVITY", bg=CARD_BG, fg=TXT_MUTED,
+                 font=F_LABEL).pack(anchor="w", pady=(0, 6))
         self.now_area_var = tk.StringVar(value="Area: —")
         self.now_target_var = tk.StringVar(value="Search: —")
         tk.Label(now_card, textvariable=self.now_area_var, bg=CARD_BG,
-                 fg=TXT, font=("Segoe UI", 10, "bold"), anchor="w",
+                 fg=TXT, font=("Segoe UI Semibold", 10), anchor="w",
                  wraplength=400, justify="left").pack(fill="x")
         tk.Label(now_card, textvariable=self.now_target_var, bg=CARD_BG,
-                 fg=TXT_MUTED, font=("Segoe UI", 9), anchor="w",
+                 fg=TXT_MUTED, font=F_BODY, anchor="w",
                  wraplength=400, justify="left").pack(fill="x", pady=(2, 0))
 
         log_frame = tk.Frame(right, bg=BG)
         log_frame.pack(fill="both", expand=True, pady=(10, 0))
         log_hdr = tk.Frame(log_frame, bg=BG)
         log_hdr.pack(fill="x")
-        tk.Label(log_hdr, text="ACTIVITY LOG", bg=BG, fg=TXT_MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        tk.Label(log_hdr, text="📜  ACTIVITY LOG", bg=BG, fg=TXT_MUTED,
+                 font=F_LABEL).pack(side="left")
         tk.Button(log_hdr, text="Clear", font=("Segoe UI", 8),
                   relief="flat", bg=INPUT_BG, fg=TXT_MUTED,
                   activebackground=BORDER, activeforeground=TXT,
@@ -3842,19 +4116,52 @@ class App:
             relief="flat", bd=0, insertbackground=TXT,
             highlightthickness=1, highlightbackground=BORDER)
         self.log_box.pack(fill="both", expand=True, pady=(4, 0))
+        self.log_box.tag_config("ok",   foreground=GREEN)
+        self.log_box.tag_config("err",  foreground=RED)
+        self.log_box.tag_config("warn", foreground=ORANGE)
+        self.log_box.tag_config("head", foreground=FB_BLUE, font=("Consolas", 9, "bold"))
+        self.log_box.tag_config("dim",  foreground=TXT_DIM)
+
+        # ── Footer ───────────────────────────────────────────
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x")
+        foot = tk.Frame(self.root, bg=CARD_BG)
+        foot.pack(fill="x")
+        tk.Label(foot, text=f"FB Group Joiner  v{APP_VERSION}   ·   build {_build_no()}",
+                 bg=CARD_BG, fg=TXT_DIM, font=F_TINY).pack(side="left", padx=14, pady=5)
+        tk.Label(foot, text=f"Tool by {BRAND}", bg=CARD_BG, fg=TXT_DIM,
+                 font=F_TINY).pack(side="right", padx=14, pady=5)
 
     def _label(self, parent, text):
         tk.Label(parent, text=text, bg=CARD_BG,
-                 font=("Segoe UI", 9, "bold"),
-                 fg=TXT_MUTED).pack(anchor="w")
+                 font=F_LABEL, fg=TXT_MUTED).pack(anchor="w", pady=(2, 1))
 
     def _tvar(self, name):
         v = tk.StringVar()
         setattr(self, f"{name}_var", v)
         return v
 
+    def _do_preflight(self):
+        if self.running or getattr(self, "_login_open", False) or \
+                getattr(self, "_logout_open", False) or \
+                getattr(self, "_preflight_open", False):
+            return
+        self._preflight_open = True
+        self.preflight_btn.config(text="🔎   Checking…", state="disabled")
+        self.btn.config(state="disabled")
+        self.login_btn.config(state="disabled")
+        self.logout_btn.config(state="disabled")
+        self.status_var.set("●  Running pre-flight check…")
+        cfg = {
+            "license_key": lic.load_active_key(),
+            "employee":    self.lic_info.get("employee", "") or "unknown",
+            "page_link":   self.page_link_var.get().strip(),
+            "gemini_keys": resolve_gemini_keys(self._gemini_box_text()),
+        }
+        threading.Thread(target=run_preflight, args=(cfg,), daemon=True).start()
+
     def _open_login(self):
-        if self.running or getattr(self, "_logout_open", False):
+        if self.running or getattr(self, "_logout_open", False) or \
+                getattr(self, "_preflight_open", False):
             return
         if getattr(self, "_login_open", False):
             # dobara dabaya -> login browser band karo
@@ -3866,23 +4173,26 @@ class App:
         self.login_btn.config(text="🌐  Browser open — log in, then click here / close it")
         self.btn.config(state="disabled")
         self.logout_btn.config(state="disabled")
+        self.preflight_btn.config(state="disabled")
         self.status_var.set("●  Login browser open…")
         threading.Thread(target=run_login_browser, daemon=True).start()
 
     def _do_logout(self):
         if self.running or getattr(self, "_login_open", False) or \
-                getattr(self, "_logout_open", False):
+                getattr(self, "_logout_open", False) or \
+                getattr(self, "_preflight_open", False):
             return
         if not messagebox.askyesno(
                 "Log out of Facebook",
-                "Ye is PC/profile ki Facebook login session clear kar dega.\n\n"
-                "Sirf tab karo jab account suspend/checkpoint ho gaya ho aur "
-                "dobara (ya kisi doosre account se) login karna ho.\n\n"
+                "This clears the Facebook login session for this PC/profile.\n\n"
+                "Only do this if the account got suspended/checkpointed and you "
+                "need to log in again (or with a different account).\n\n"
                 "Continue?"):
             return
         self._logout_open = True
         self.logout_btn.config(text="🚪  Logging out…", state="disabled")
         self.login_btn.config(state="disabled")
+        self.preflight_btn.config(state="disabled")
         self.btn.config(state="disabled")
         self.status_var.set("●  Logging out of Facebook…")
         threading.Thread(target=run_logout_browser, daemon=True).start()
@@ -3896,11 +4206,15 @@ class App:
         else:
             if getattr(self, "_login_open", False):
                 messagebox.showinfo("Login browser open",
-                                    "Pehle login browser band karo, phir START.")
+                                    "Close the login browser first, then START.")
                 return
             if getattr(self, "_logout_open", False):
                 messagebox.showinfo("Logging out",
-                                    "Logout khatam hone ka intezaar karo, phir START.")
+                                    "Wait for the logout to finish, then START.")
+                return
+            if getattr(self, "_preflight_open", False):
+                messagebox.showinfo("Pre-flight check",
+                                    "Let the pre-flight check finish, then START.")
                 return
             # ── License check — no START without a valid key ──
             info = lic.validate_key(lic.load_active_key())
@@ -3921,16 +4235,18 @@ class App:
             stop_event.clear()
             self.joined_today  = 0
             self.skipped_today = 0
+            self._run_start = time.time()
             self._update_stats()
             self.progress["maximum"] = self.daily_limit_var.get()
             self.progress["value"]   = 0
-            self.progress_lbl_var.set(f"0 / {self.daily_limit_var.get()} joined today")
-            self.now_area_var.set("Area: starting...")
+            self.progress_lbl_var.set(f"/ {self.daily_limit_var.get()}  ·  joined")
+            self.now_area_var.set("Area: starting…")
             self.now_target_var.set("Search: —")
             self.running = True
             self.btn.config(text="⏹   STOP", bg=RED)
             self.login_btn.config(state="disabled")
             self.logout_btn.config(state="disabled")
+            self.preflight_btn.config(state="disabled")
             self.status_var.set("●  Running...")
             config = {
                 "city":        city,
@@ -3971,8 +4287,20 @@ class App:
             threading.Thread(target=run_playwright, args=(config,), daemon=True).start()
 
     def _log(self, text):
+        s = text.lstrip()
+        tag = ""
+        if s[:2] in ("✅", "🎉", "🟢") or s.startswith(("✅", "🎉", "🟢")):
+            tag = "ok"
+        elif s.startswith(("❌", "⛔", "🚫", "🚨")):
+            tag = "err"
+        elif s.startswith(("⚠️", "⏸️", "🍁", "☕", "🕗", "🔁", "↻")):
+            tag = "warn"
+        elif s.startswith("■"):
+            tag = "head"
+        elif s.startswith(("↻", "🕘", "📡", "🗺", "📍", "🔍")) or s.startswith("   ⏳"):
+            tag = "dim"
         self.log_box.config(state="normal")
-        self.log_box.insert("end", text + "\n")
+        self.log_box.insert("end", text + "\n", tag)
         self.log_box.see("end")
         self.log_box.config(state="disabled")
 
@@ -4000,37 +4328,61 @@ class App:
                     self.joined_today = msg["count"]
                     self._update_stats()
                     self.progress["value"] = self.joined_today
-                    self.progress_lbl_var.set(f"{self.joined_today} / {self.daily_limit_var.get()} joined today")
+                    self.progress_lbl_var.set(f"/ {self.daily_limit_var.get()}  ·  joined")
                 elif t == "skipped":
                     self.skipped_today += 1
                     self._update_stats()
                 elif t in ("total", "total_skipped"):
-                    pass  # All-time counters UI se hata diye — files mein ab bhi save hote hain
+                    pass  # all-time counters removed from the UI — still saved to files
                 elif t == "login_done":
                     self._login_open = False
                     self.login_btn.config(
-                        text="🔓  Open browser & log in to Facebook", state="normal")
+                        text="🔓  Log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
+                    self.preflight_btn.config(state="normal")
                     self.status_var.set("●  Login done — press START")
                     self._refresh_license_ui()
                 elif t == "logout_done":
                     self._logout_open = False
                     self.logout_btn.config(text="🚪  Log out", state="normal")
                     self.login_btn.config(state="normal")
+                    self.preflight_btn.config(state="normal")
                     self.status_var.set("●  Logged out — press 'Open browser & log in' to sign in again")
+                    self._refresh_license_ui()
+                elif t == "preflight_done":
+                    self._preflight_open = False
+                    self.preflight_btn.config(
+                        text="🔎   Pre-flight check",
+                        state="normal")
+                    self.login_btn.config(state="normal")
+                    self.logout_btn.config(state="normal")
+                    self.status_var.set("●  Pre-flight done — see the log")
                     self._refresh_license_ui()
                 elif t == "stopped":
                     self.running = False
                     self._login_open = False
+                    self._run_start = None
                     self.btn.config(text="▶   START", bg=GREEN)
                     self.login_btn.config(
-                        text="🔓  Open browser & log in to Facebook", state="normal")
+                        text="🔓  Log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
+                    self.preflight_btn.config(state="normal")
                     self.status_var.set("●  Idle — press START to begin")
                     self.now_target_var.set("Search: —")
                     self._log(f"📊 Today: {self.joined_today} joined | {self.skipped_today} skipped this run")
-                    self._refresh_license_ui()  # expire hui to START dobara lock
+                    self._refresh_license_ui()  # re-lock START if the key expired
         except queue.Empty:
+            pass
+        # running time in the TODAY card
+        try:
+            rs = getattr(self, "_run_start", None)
+            if rs and self.running:
+                sec = int(time.time() - rs)
+                h, m = sec // 3600, (sec % 3600) // 60
+                self.runtime_var.set(f"● running  {h}h {m:02d}m" if h else f"● running  {m}m")
+            else:
+                self.runtime_var.set("")
+        except Exception:
             pass
         self.root.after(400, self._poll)
 
@@ -4047,7 +4399,7 @@ def _self_update():
     naye code ke saath restart karo. Frozen .exe par skip (chalti exe
     replace nahi hoti)."""
     if getattr(sys, "frozen", False) or "--no-update" in sys.argv:
-        print(f"[build] FB Group Joiner v{APP_VERSION} (build {_build_no()}) - auto-update off")
+        print(f"[build] FB Group Joiner v{APP_VERSION}  -  Tool by {BRAND}  (build {_build_no()}, auto-update off)")
         return
     try:
         import updater
@@ -4084,7 +4436,7 @@ def _self_update():
         raise
     except Exception:
         pass
-    print(f"[build] FB Group Joiner v{APP_VERSION} (build {_build_no()})")
+    print(f"[build] FB Group Joiner v{APP_VERSION}  -  Tool by {BRAND}  (build {_build_no()})")
 
 
 if __name__ == "__main__":
