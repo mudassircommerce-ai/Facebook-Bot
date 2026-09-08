@@ -69,6 +69,11 @@ PW_PROFILE_DIR = os.path.join(APP_DIR, f"pw_profile{SUFFIX}")
 ALL_AREAS_LABEL = "🌎 ALL AREAS (loop through every area in this list)"
 AREA_CACHE_FILE = os.path.join(APP_DIR, "areas_cache.json")
 
+# Rest cycle: har REST_EVERY joins ke baad REST_MINUTES ka rest, phir aage —
+# daily limit tak. (config se override ho sakta hai: rest_every / rest_minutes)
+REST_EVERY   = 50
+REST_MINUTES = 10
+
 # Account 1 ke liye purana default page rakha hai (backward compatible).
 # Baaki accounts (2, 3, ...) mein khali rakhte hain — har account ka apna
 # page naam UI mein zaroor type karna hoga.
@@ -292,13 +297,20 @@ def save_settings(d: dict) -> None:
 
 
 def _split_keys(text: str) -> list:
-    """Newline / comma / space se alag karo, order + uniqueness rakho."""
+    """Gemini API keys nikaalo — # comment lines skip, sirf asli key-shape
+    tokens (AQ. / AIza / lambi alphanumeric) rakho. Order + uniqueness."""
     out, seen = [], set()
-    for part in re.split(r"[\s,]+", (text or "").strip()):
-        p = part.strip()
-        if p and p not in seen:
-            seen.add(p)
-            out.append(p)
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for part in re.split(r"[\s,]+", line):
+            p = part.strip()
+            if not p or p in seen:
+                continue
+            if p.startswith(("AQ.", "AIza")) or (len(p) >= 20 and re.fullmatch(r"[A-Za-z0-9._\-]+", p)):
+                seen.add(p)
+                out.append(p)
     return out
 
 
@@ -742,109 +754,6 @@ def send_ui(msg_type, **kwargs):
 
 async def sleep(sec):
     await asyncio.sleep(sec)
-
-
-async def _sleep_interruptible(secs, chunk=5):
-    """Lambi wait (break / off-hours) — stop_event set hote hi turant wapas."""
-    end = time.time() + max(0.0, secs)
-    while time.time() < end and not stop_event.is_set():
-        await asyncio.sleep(min(chunk, max(0.2, end - time.time())))
-
-
-def _parse_hhmm(s, default_min):
-    try:
-        h, m = str(s).strip().split(":")
-        h, m = int(h), int(m)
-        if 0 <= h <= 23 and 0 <= m <= 59:
-            return h * 60 + m
-    except Exception:
-        pass
-    return default_min
-
-
-def _fmt_hhmm(mins):
-    return f"{(mins // 60) % 24:02d}:{mins % 60:02d}"
-
-
-class HumanPacer:
-    """
-    Din ke joins ko phaila deta hai (bina-ruke burst nahi), working-hours ke
-    bahar ruk jata hai, aur beech mein 'natural break' leta hai — pattern
-    insani lage aur account safe rahe.
-    """
-
-    def __init__(self, config):
-        self.on        = bool(config.get("pace_enabled", True))
-        self.limit     = int(config.get("daily_limit", 250) or 250)
-        self.win_start = _parse_hhmm(config.get("work_start", "09:00"), 9 * 60)
-        self.win_end   = _parse_hhmm(config.get("work_end", "21:00"), 21 * 60)
-        self.n_session = 0
-        self.since_brk = 0
-        self.brk_at    = random.randint(18, 32)
-
-    def _now_min(self):
-        t = datetime.now()
-        return t.hour * 60 + t.minute
-
-    def _in_window(self):
-        if self.win_start == self.win_end:
-            return True
-        n = self._now_min()
-        if self.win_start < self.win_end:
-            return self.win_start <= n < self.win_end
-        return n >= self.win_start or n < self.win_end       # overnight
-
-    def _secs_left_in_window(self):
-        if self.win_start == self.win_end:
-            # 24h mode — quota poore din (midnight tak) mein phailao;
-            # kam se kam 2h ka runway rakho (raat ko START ho to bhi)
-            n = self._now_min()
-            return max(2 * 3600, (24 * 60 - n) * 60)
-        n = self._now_min()
-        if self.win_start < self.win_end:
-            return max(60, (self.win_end - n) * 60)
-        if n >= self.win_start:
-            return max(60, (24 * 60 - n + self.win_end) * 60)
-        return max(60, (self.win_end - n) * 60)
-
-    async def wait_for_window(self):
-        if not self.on:
-            return
-        told = False
-        while self.on and not self._in_window() and not stop_event.is_set():
-            if not told:
-                send_ui("log", text=f"🕗 Outside working hours "
-                                    f"({_fmt_hhmm(self.win_start)}–{_fmt_hhmm(self.win_end)}) "
-                                    f"— waiting for the window to open…")
-                told = True
-            await _sleep_interruptible(180)
-        if told and not stop_event.is_set():
-            send_ui("log", text="🕘 Working hours started — joining resumed.")
-
-    async def pace(self, joined_today):
-        """Call this AFTER a successful join."""
-        if not self.on:
-            await sleep(rand_delay(4, 9))
-            return
-        self.n_session += 1
-        self.since_brk += 1
-
-        if self.since_brk >= self.brk_at:
-            mins = random.randint(5, 15)
-            send_ui("log", text=f"☕ Natural break — {mins} min")
-            await _sleep_interruptible(mins * 60)
-            self.since_brk = 0
-            self.brk_at    = random.randint(20, 38)
-            if stop_event.is_set():
-                return
-
-        remaining = max(1, self.limit - joined_today)
-        gap = self._secs_left_in_window() / remaining
-        gap = max(25.0, min(300.0, gap)) * random.uniform(0.7, 1.35)
-        if self.n_session <= 15:                    # dheema start
-            gap *= random.uniform(1.6, 2.4)
-        send_ui("log", text=f"   ⏳ {gap:.0f}s wait (paced)")
-        await _sleep_interruptible(gap)
 
 
 async def human_type(el, text):
@@ -2418,7 +2327,7 @@ async def join_one_group(page, url, name, area, config):
         log_csv(area, name, url, "error")
         return "skipped"
 
-async def search_and_join(page, city, already_joined, config, joined_today=0, pacer=None):
+async def search_and_join(page, city, already_joined, config, joined_today=0):
     global CURRENT_CITY
     CURRENT_CITY = city
     joined  = 0
@@ -2519,12 +2428,6 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, pa
         if stop_event.is_set() or joined_today + joined >= limit:
             break
 
-        # Working-hours ke bahar ho to yahin ruk jao (window khulne tak)
-        if pacer is not None:
-            await pacer.wait_for_window()
-            if stop_event.is_set():
-                break
-
         name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
         status = await join_one_group(page, group_url, name, city, config)
 
@@ -2535,12 +2438,26 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, pa
         if status == "joined":
             joined += 1
             already_joined.add(group_url)
-            send_ui("joined", count=joined_today + joined)
+            _total_now = joined_today + joined
+            send_ui("joined", count=_total_now)
             if _act:
                 try:
                     _act.record_join()
                 except Exception:
                     pass
+
+            # ── Rest cycle: har REST_EVERY joins ke baad REST_MINUTES rest ──
+            _re = int(config.get("rest_every", REST_EVERY) or 0)
+            _rm = int(config.get("rest_minutes", REST_MINUTES) or 0)
+            if _re and _rm and _total_now % _re == 0 and _total_now < limit \
+                    and not stop_event.is_set():
+                send_ui("log", text=f"😴 {_total_now} groups joined — resting {_rm} min, "
+                                    f"then continuing (until {limit}).")
+                _end = time.time() + _rm * 60
+                while time.time() < _end and not stop_event.is_set():
+                    await asyncio.sleep(5)
+                if not stop_event.is_set():
+                    send_ui("log", text="▶️ Rest over — resuming.")
 
         elif status == "skipped":
             skipped += 1
@@ -2553,15 +2470,11 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, pa
 
         # Delay strategy: Facebook sirf JOIN action ko sensitive samajhta
         # hai — group ka page dekhna aam browsing hai. Isliye join ke baad
-        # poora delay, skip ke baad chhota sa.
+        # poora delay (Delay Min/Max), skip ke baad chhota sa.
         if status == "joined":
-            if pacer is not None:
-                # Human pacing: din bhar phaila ke + breaks (account safe)
-                await pacer.pace(joined_today + joined)
-            else:
-                wait = rand_delay(config["delay_min"], config["delay_max"])
-                send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
-                await sleep(wait)
+            wait = rand_delay(config["delay_min"], config["delay_max"])
+            send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
+            await sleep(wait)
         else:
             await sleep(rand_delay(1.5, 3.5))
 
@@ -2870,14 +2783,8 @@ async def playwright_main(config):
 
         wd_task = asyncio.create_task(_license_watchdog())
 
-        pacer = HumanPacer(config)
-        if pacer.on:
-            send_ui("log", text=f"🚶 Human pacing ON — joins spread across the day "
-                                f"({_fmt_hhmm(pacer.win_start)}–{_fmt_hhmm(pacer.win_end)}), "
-                                f"with breaks. (Account safety)")
-        else:
-            send_ui("log", text="⚡ Human pacing OFF — fixed delays "
-                                f"({config.get('delay_min')}–{config.get('delay_max')}s).")
+        send_ui("log", text=f"⚡ Delay between joins: {config.get('delay_min')}–"
+                            f"{config.get('delay_max')}s  ·  runs 24/7 until the daily limit.")
 
         selection = config["city"]
         limit     = config["daily_limit"]
@@ -2935,7 +2842,7 @@ async def playwright_main(config):
                         break
                     config["_current_city"] = target
                     n_joined, n_skipped = await search_and_join(
-                        page, target, already_joined, config, joined_today, pacer)
+                        page, target, already_joined, config, joined_today)
                     joined_today  += n_joined
                     skipped_today += n_skipped
                     total         += n_joined
@@ -3542,19 +3449,15 @@ class App:
         save_settings(s)
 
     def _persist_simple(self):
-        """Page link + area + pacing + business mode turant save — har profile
-        (account) ka apna alag, taake dobara khulne par bhare rahein aur ek
-        doosre ko overwrite na karein."""
+        """Page link + area + business mode turant save — har profile ka apna
+        alag, taake dobara khulne par bhare rahein aur ek doosre ko overwrite
+        na karein."""
         try:
             s = load_settings()
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
             if hasattr(self, "business_var"):
                 s[f"business_mode{SUFFIX}"] = self.business_var.get()
-            if hasattr(self, "pace_var"):
-                s[f"pace_enabled{SUFFIX}"] = bool(self.pace_var.get())
-                s[f"work_start{SUFFIX}"] = self.work_start_var.get().strip()
-                s[f"work_end{SUFFIX}"] = self.work_end_var.get().strip()
             save_settings(s)
         except Exception:
             pass
@@ -3823,10 +3726,22 @@ class App:
 
     def _grouphdr(self, parent, text, first=False):
         """Settings ke andar chhota section header + divider — visual grouping."""
-        tk.Frame(parent, bg=BORDER, height=1).pack(
-            fill="x", pady=(4 if first else 14, 8))
+        if not first:
+            tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", pady=(16, 0))
         tk.Label(parent, text=text, bg=CARD_BG, fg=FB_BLUE,
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 6))
+                 font=("Segoe UI Semibold", 9)).pack(anchor="w", pady=(12 if not first else 0, 8))
+
+    def _check(self, parent, text, var):
+        """Consistent-styled checkbox."""
+        tk.Checkbutton(parent, text=text, variable=var, bg=CARD_BG, fg=TXT_MUTED,
+                       selectcolor=INPUT_BG, activebackground=CARD_BG,
+                       activeforeground=TXT, font=F_SMALL, anchor="w",
+                       highlightthickness=0, bd=0, padx=0,
+                       wraplength=360, justify="left").pack(anchor="w", pady=(3, 0))
+
+    def _note(self, parent, text):
+        tk.Label(parent, text=text, bg=CARD_BG, fg=TXT_DIM, font=F_TINY,
+                 wraplength=360, justify="left").pack(anchor="w", pady=(4, 0))
 
     def _entry(self, parent, var, **pack_opts):
         e = tk.Entry(parent, textvariable=var, font=("Segoe UI", 11),
@@ -3938,6 +3853,18 @@ class App:
             command=self._do_preflight, pady=7)
         self.preflight_btn.pack(fill="x")
 
+        # Auto-post on Page (not built yet)
+        autopost_row = tk.Frame(left, bg=BG)
+        autopost_row.pack(side="bottom", fill="x", pady=(6, 0))
+        self.autopost_btn = tk.Button(
+            autopost_row, text="📢   Auto-post on Page",
+            bg=CARD_BG, fg=TXT_MUTED, font=("Segoe UI Semibold", 9),
+            relief="flat", cursor="hand2", bd=0,
+            highlightthickness=1, highlightbackground=BORDER, highlightcolor=BORDER,
+            activebackground=CARD_HI, activeforeground=TXT,
+            command=self._auto_post_soon, pady=7)
+        self.autopost_btn.pack(fill="x")
+
         # Tertiary: login / logout (ghost)
         acct_row = tk.Frame(left, bg=BG)
         acct_row.pack(side="bottom", fill="x", pady=(6, 0))
@@ -3979,137 +3906,90 @@ class App:
 
         self._grouphdr(card, "🎯  TARGET", first=True)
 
-        # ── Business toggle: Car / Duct (mutually exclusive) ──
+        # Business toggle: Car / Duct (two equal halves, mutually exclusive)
         self.business_var = tk.StringVar(
             value=(_s0.get(f"business_mode{SUFFIX}") or _s0.get("business_mode") or "car").lower())
-        self._label(card, "Business  (area list)")
-        brow = tk.Frame(card, bg=CARD_BG); brow.pack(fill="x", pady=(2, 8))
+        self._label(card, "Business  ·  picks the area list")
+        brow = tk.Frame(card, bg=CARD_BG); brow.pack(fill="x", pady=(0, 2))
         self._biz_btns = {}
-        for _key, _txt in (("car", "🚗  Car detailing"), ("duct", "💨  Duct cleaning")):
+        for _key, _txt in (("car", "🚗  Car"), ("duct", "💨  Duct")):
             b = tk.Radiobutton(
                 brow, text=_txt, value=_key, variable=self.business_var,
-                indicatoron=False, width=16, font=("Segoe UI Semibold", 9),
+                indicatoron=False, font=("Segoe UI Semibold", 9),
                 bg=INPUT_BG, fg=TXT_MUTED, selectcolor=FB_BLUE_D,
-                activebackground=BORDER, activeforeground=TXT,
-                relief="flat", bd=0, cursor="hand2", pady=6,
+                activebackground=BORDER, activeforeground="white",
+                relief="flat", bd=0, cursor="hand2", pady=7,
                 command=self._on_business_change)
-            b.pack(side="left", padx=(0, 6))
+            b.pack(side="left", fill="x", expand=True, padx=(0, 6) if _key == "car" else 0)
             self._biz_btns[_key] = b
         for _k, _b in self._biz_btns.items():
-            _b.config(fg=(TXT if _k == self.business_var.get() else TXT_MUTED))
+            _b.config(fg=("white" if _k == self.business_var.get() else TXT_MUTED))
 
         self._label(card, "Area")
         self.city_var = tk.StringVar(
             value=_s0.get(f"city{SUFFIX}") or _s0.get("city") or ALL_AREAS_LABEL)
         self.area_combo = ttk.Combobox(card, textvariable=self.city_var,
                                    values=[ALL_AREAS_LABEL] + areas_for(self.business_var.get()),
-                                   font=("Segoe UI", 10),
-                                   state="normal", style="Dark.TCombobox")
-        self.area_combo.pack(fill="x", pady=(2, 10), ipady=3)
+                                   font=F_BODY, state="normal", style="Dark.TCombobox")
+        self.area_combo.pack(fill="x", pady=(0, 2), ipady=4)
 
-        self._label(card, "Page Link (your Facebook page URL)")
+        self._label(card, "Facebook Page link")
         self.page_link_var = tk.StringVar(
             value=_s0.get(f"page_link{SUFFIX}") or _s0.get("page_link") or DEFAULT_PAGE_LINK)
-        self._entry(card, self.page_link_var, pady=(2, 10))
-        # Page link + area badalte hi turant save — baar-baar paste na karna pade
+        self._entry(card, self.page_link_var, pady=(0, 2))
         self.page_link_var.trace_add("write", lambda *a: self._persist_simple())
         self.city_var.trace_add("write", lambda *a: self._persist_simple())
 
-        self._grouphdr(card, "⏱  LIMITS & PACING")
+        # ── LIMITS & SPEED ──────────────────────────────────
+        self._grouphdr(card, "⏱  LIMITS & SPEED")
         row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
-        col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 6))
         col2 = tk.Frame(row1, bg=CARD_BG); col2.pack(side="left", expand=True, fill="x")
-
-        self._label(col1, "Min Members")
+        self._label(col1, "Min members")
         self.min_members_var = tk.IntVar(value=1000)
-        self._entry(col1, self.min_members_var, pady=(2, 10))
-
-        self._label(col2, "Daily Limit")
+        self._entry(col1, self.min_members_var, pady=(0, 2))
+        self._label(col2, "Daily limit")
         self.daily_limit_var = tk.IntVar(value=250)
-        self._entry(col2, self.daily_limit_var, pady=(2, 10))
+        self._entry(col2, self.daily_limit_var, pady=(0, 2))
 
         row2 = tk.Frame(card, bg=CARD_BG); row2.pack(fill="x")
-        col3 = tk.Frame(row2, bg=CARD_BG); col3.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        col3 = tk.Frame(row2, bg=CARD_BG); col3.pack(side="left", expand=True, fill="x", padx=(0, 6))
         col4 = tk.Frame(row2, bg=CARD_BG); col4.pack(side="left", expand=True, fill="x")
-
-        self._label(col3, "Delay Min (sec)")
+        self._label(col3, "Delay min (sec)")
         self.delay_min_var = tk.IntVar(value=5)
-        self._entry(col3, self.delay_min_var, pady=(2, 4))
-
-        self._label(col4, "Delay Max (sec)")
+        self._entry(col3, self.delay_min_var, pady=(0, 2))
+        self._label(col4, "Delay max (sec)")
         self.delay_max_var = tk.IntVar(value=12)
-        self._entry(col4, self.delay_max_var, pady=(2, 4))
+        self._entry(col4, self.delay_max_var, pady=(0, 2))
 
-        # ── Human pacing (account safety) ──
-        _pace_def = _s0.get(f"pace_enabled{SUFFIX}")
-        if _pace_def is None:
-            _pace_def = _s0.get("pace_enabled", True)
-        self.pace_var = tk.BooleanVar(value=bool(_pace_def))
-        tk.Checkbutton(card,
-                       text="Human pacing — spread joins across the day + take breaks (recommended)",
-                       variable=self.pace_var, bg=CARD_BG, fg=TXT_MUTED,
-                       selectcolor=INPUT_BG, activebackground=CARD_BG,
-                       activeforeground=TXT, font=("Segoe UI", 8),
-                       highlightthickness=0, bd=0,
-                       command=self._persist_simple).pack(anchor="w", pady=(8, 2))
-        wrow = tk.Frame(card, bg=CARD_BG); wrow.pack(fill="x")
-        wc1 = tk.Frame(wrow, bg=CARD_BG); wc1.pack(side="left", expand=True, fill="x", padx=(0, 5))
-        wc2 = tk.Frame(wrow, bg=CARD_BG); wc2.pack(side="left", expand=True, fill="x")
-        self._label(wc1, "Work start (HH:MM)")
-        self.work_start_var = tk.StringVar(
-            value=_s0.get(f"work_start{SUFFIX}") or _s0.get("work_start") or "09:00")
-        self._entry(wc1, self.work_start_var, pady=(2, 4))
-        self._label(wc2, "Work end (HH:MM)")
-        self.work_end_var = tk.StringVar(
-            value=_s0.get(f"work_end{SUFFIX}") or _s0.get("work_end") or "21:00")
-        self._entry(wc2, self.work_end_var, pady=(2, 4))
-        self.work_start_var.trace_add("write", lambda *a: self._persist_simple())
-        self.work_end_var.trace_add("write", lambda *a: self._persist_simple())
-        tk.Label(card, text="Pacing ON = 'Delay Min/Max' ignored; joins are spread "
-                            "across the day. Same HH:MM for both = 24h.",
-                 bg=CARD_BG, fg=TXT_MUTED, font=("Segoe UI", 7),
-                 wraplength=380, justify="left").pack(anchor="w", pady=(0, 2))
-
-        # ── Public / Private target mix ──
-        row3 = tk.Frame(card, bg=CARD_BG); row3.pack(fill="x", pady=(8, 0))
-        self._label(row3, "Public %  (rest = Private)")
-        pcell = tk.Frame(row3, bg=CARD_BG); pcell.pack(fill="x")
+        self._label(card, "Public %  ·  rest = private")
+        pcell = tk.Frame(card, bg=CARD_BG); pcell.pack(fill="x")
         self.public_pct_var = tk.IntVar(value=int(_s0.get("public_pct", 30)))
-        e = tk.Entry(pcell, textvariable=self.public_pct_var, font=("Segoe UI", 11),
+        e = tk.Entry(pcell, textvariable=self.public_pct_var, font=F_BODY,
                      bg=INPUT_BG, fg=TXT, insertbackground=TXT, relief="flat", width=6,
                      highlightthickness=1, highlightbackground=BORDER, highlightcolor=FB_BLUE)
-        e.pack(side="left", ipady=3)
-        self.mix_lbl = tk.Label(pcell, text="", bg=CARD_BG, fg=TXT_MUTED,
-                                font=("Segoe UI", 8))
-        self.mix_lbl.pack(side="left", padx=(8, 0))
+        e.pack(side="left", ipady=4)
+        self.mix_lbl = tk.Label(pcell, text="", bg=CARD_BG, fg=TXT_MUTED, font=F_SMALL)
+        self.mix_lbl.pack(side="left", padx=(10, 0))
         e.bind("<KeyRelease>", lambda ev: self._refresh_mix_lbl())
 
+        self._note(card, f"Runs 24/7 · rests {REST_MINUTES} min after every "
+                         f"{REST_EVERY} joins · stops at the daily limit.")
+
+        # ── SAFETY FILTERS ──────────────────────────────────
         self._grouphdr(card, "🛡  SAFETY FILTERS")
         self.skip_nopost_var = tk.BooleanVar(value=bool(_s0.get("skip_no_post", True)))
-        tk.Checkbutton(card, text="Skip groups where members can't post (admin-only)",
-                       variable=self.skip_nopost_var, bg=CARD_BG, fg=TXT_MUTED,
-                       selectcolor=INPUT_BG, activebackground=CARD_BG,
-                       activeforeground=TXT, font=("Segoe UI", 8),
-                       highlightthickness=0, bd=0).pack(anchor="w", pady=(6, 2))
-
+        self._check(card, "Skip admin-only groups (members can't post)", self.skip_nopost_var)
         self.same_state_var = tk.BooleanVar(value=bool(_s0.get("same_state_only", True)))
-        tk.Checkbutton(card, text="Stay inside the target state only (50-mi radius, then next area)",
-                       variable=self.same_state_var, bg=CARD_BG, fg=TXT_MUTED,
-                       selectcolor=INPUT_BG, activebackground=CARD_BG,
-                       activeforeground=TXT, font=("Segoe UI", 8),
-                       highlightthickness=0, bd=0).pack(anchor="w", pady=(0, 2))
-
+        self._check(card, "Stay inside the target state only", self.same_state_var)
         self.include_counties_var = tk.BooleanVar(value=bool(_s0.get("include_counties", True)))
-        tk.Checkbutton(card, text="Also join county-level groups (untick = cities only, no counties)",
-                       variable=self.include_counties_var, bg=CARD_BG, fg=TXT_MUTED,
-                       selectcolor=INPUT_BG, activebackground=CARD_BG,
-                       activeforeground=TXT, font=("Segoe UI", 8),
-                       highlightthickness=0, bd=0).pack(anchor="w", pady=(0, 2))
+        self._check(card, "Also join county-level groups", self.include_counties_var)
+        self._note(card, "Always on:  USA only · no buy/sell · engagement check")
 
-        self._label(card, "Don't-join keywords  —  one per line (added to buy/sell filter)")
+        self._label(card, "Don't-join keywords  ·  one per line")
         bkrow = tk.Frame(card, bg=CARD_BG)
-        bkrow.pack(fill="x", pady=(2, 4))
-        self.block_box = tk.Text(bkrow, height=3, font=("Consolas", 8), bg=INPUT_BG,
+        bkrow.pack(fill="x", pady=(0, 2))
+        self.block_box = tk.Text(bkrow, height=3, font=F_MONO, bg=INPUT_BG,
                                  fg=TXT, insertbackground=TXT, relief="flat", wrap="word",
                                  highlightthickness=1, highlightbackground=BORDER,
                                  highlightcolor=FB_BLUE)
@@ -4121,40 +4001,35 @@ class App:
             self.block_box.insert("1.0", "\n".join(resolve_block_keywords()))
         except Exception:
             pass
-        tk.Button(card, text="Reset to default list", bg=INPUT_BG, fg=TXT_MUTED,
-                  relief="flat", font=("Segoe UI", 7), cursor="hand2", padx=6,
+        tk.Button(card, text="Reset to defaults", bg=INPUT_BG, fg=TXT_MUTED,
+                  relief="flat", font=F_TINY, cursor="hand2", padx=8,
                   command=lambda: (self.block_box.delete("1.0", "end"),
                                    self.block_box.insert("1.0",
                                        "\n".join(DEFAULT_DONT_JOIN)))
-                  ).pack(anchor="w", pady=(0, 2))
+                  ).pack(anchor="w", pady=(4, 0))
 
-        tk.Label(card, text="Always on:  USA only  ·  no buy/sell  ·  engagement check",
-                 bg=CARD_BG, fg=TXT_MUTED, font=("Segoe UI", 8),
-                 justify="left").pack(anchor="w", pady=(6, 4))
-
-        # ── Gemini API keys — AI answers (auto-loaded from gemini_keys.txt) ──
+        # ── AI ANSWERS ──────────────────────────────────────
         self._grouphdr(card, "🤖  AI ANSWERS  (optional)")
-        self._label(card, "Gemini API Keys  —  one per line  ·  auto-loads gemini_keys.txt")
+        self._label(card, "Gemini API keys  ·  one per line  ·  auto-loads gemini_keys.txt")
         grow = tk.Frame(card, bg=CARD_BG)
-        grow.pack(fill="x", pady=(2, 2))
-        self.gemini_box = tk.Text(grow, height=3, font=("Consolas", 8), bg=INPUT_BG,
+        grow.pack(fill="x", pady=(0, 2))
+        self.gemini_box = tk.Text(grow, height=3, font=F_MONO, bg=INPUT_BG,
                                   fg=TXT, insertbackground=TXT, relief="flat", wrap="none",
                                   highlightthickness=1, highlightbackground=BORDER,
                                   highlightcolor=FB_BLUE)
         self.gemini_box.pack(side="left", fill="x", expand=True)
         try:
-            # settings > env > gemini_keys.txt in the bot folder — all auto
             _prev = resolve_gemini_keys("")
             if _prev:
                 self.gemini_box.insert("1.0", "\n".join(_prev))
         except Exception:
             pass
         tk.Button(grow, text="Test", bg=INPUT_BG, fg=TXT, relief="flat",
-                  font=("Segoe UI", 8), cursor="hand2", padx=8,
-                  command=self._test_gemini).pack(side="left", padx=(4, 0))
+                  font=F_SMALL, cursor="hand2", padx=10,
+                  command=self._test_gemini).pack(side="left", padx=(6, 0))
         self.gemini_status = tk.Label(card, text="", bg=CARD_BG, fg=TXT_MUTED,
-                                      font=("Segoe UI", 8), anchor="w")
-        self.gemini_status.pack(anchor="w")
+                                      font=F_SMALL, anchor="w")
+        self.gemini_status.pack(anchor="w", pady=(4, 0))
         self.gemini_box.bind("<KeyRelease>", lambda e: self._refresh_gemini_status())
 
         # (START button is pinned at the bottom of the left column — created above)
@@ -4239,12 +4114,17 @@ class App:
 
     def _label(self, parent, text):
         tk.Label(parent, text=text, bg=CARD_BG,
-                 font=F_LABEL, fg=TXT_MUTED).pack(anchor="w", pady=(2, 1))
+                 font=F_LABEL, fg=TXT_MUTED).pack(anchor="w", pady=(10, 3))
 
     def _tvar(self, name):
         v = tk.StringVar()
         setattr(self, f"{name}_var", v)
         return v
+
+    def _auto_post_soon(self):
+        messagebox.showinfo("Auto-post on Page",
+                            "Coming Soon 🚧\n\nAuto-posting to your Facebook Page "
+                            "is not available yet — it'll be added in a future update.")
 
     def _do_preflight(self):
         if self.running or getattr(self, "_login_open", False) or \
@@ -4372,9 +4252,6 @@ class App:
                 "same_state_only": bool(self.same_state_var.get()),
                 "include_counties": bool(self.include_counties_var.get()),
                 "custom_blocked": self._block_keywords(),
-                "pace_enabled": bool(self.pace_var.get()),
-                "work_start":  self.work_start_var.get().strip() or "09:00",
-                "work_end":    self.work_end_var.get().strip() or "21:00",
                 "business_mode": self.business_var.get(),
             }
             self._persist_gemini()          # remember keys for next time
@@ -4382,9 +4259,6 @@ class App:
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
             s[f"business_mode{SUFFIX}"] = self.business_var.get()
-            s[f"pace_enabled{SUFFIX}"] = bool(self.pace_var.get())
-            s[f"work_start{SUFFIX}"] = self.work_start_var.get().strip() or "09:00"
-            s[f"work_end{SUFFIX}"] = self.work_end_var.get().strip() or "21:00"
             s["public_pct"] = self._public_pct()
             s["skip_no_post"] = bool(self.skip_nopost_var.get())
             s["same_state_only"] = bool(self.same_state_var.get())
