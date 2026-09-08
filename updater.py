@@ -145,31 +145,26 @@ def check_and_apply(update_url: str, base_dir: str, log=print, alert=None) -> bo
     except Exception:
         is_newer = bool(ver) and ver != local_ver
 
-    to_get = [(n, s) for n, s in files.items()
-              if n in UPDATABLE and _sha(os.path.join(base_dir, n)) != s]
-
-    if not to_get:
+    # NEVER DOWNGRADE. Agar GitHub ka version local se bara nahi hai, kuch
+    # mat karo — local same/aage hai. (Tamper-check alag se check_integrity_only
+    # karta hai, aur woh sirf tab jab version bilkul match kare.)
+    if not is_newer:
         if not local_ver and ver:
             try:
-                open(verfile, "w", encoding="utf-8").write(ver)   # loop se bacho
+                open(verfile, "w", encoding="utf-8").write(ver)
             except Exception:
                 pass
         return False
 
-    if not is_newer:
-        # Version GitHub jaisa (ya us se bara) hai, phir bhi hash farak hai —
-        # koi normal update nahi hua tha, matlab file(s) manually badli gayi
-        # hain. Turant alert + original files se heal (restore) karo.
-        names = ", ".join(n for n, _ in to_get)
-        msg = (f"FILE TAMPERING DETECTED on this PC: {names} "
-               f"was/were modified outside the update system. "
-               f"Restoring original file(s) automatically.")
-        log(f"   [SECURITY] {msg}")
-        if alert:
-            try:
-                alert(msg)
-            except Exception:
-                pass
+    to_get = [(n, s) for n, s in files.items()
+              if n in UPDATABLE and _sha(os.path.join(base_dir, n)) != s]
+
+    if not to_get:
+        try:
+            open(verfile, "w", encoding="utf-8").write(ver)   # loop se bacho
+        except Exception:
+            pass
+        return False
 
     log(f"   [update] v{ver}: downloading {len(to_get)} file(s)...")
     staged = []
@@ -200,10 +195,7 @@ def check_and_apply(update_url: str, base_dir: str, log=print, alert=None) -> bo
         open(verfile, "w", encoding="utf-8").write(ver)
     except Exception:
         pass
-    if is_newer:
-        log(f"   [update] applied {len(staged)} file(s) -> v{ver}. Restarting...")
-    else:
-        log(f"   [security] restored {len(staged)} file(s) to verified originals. Restarting...")
+    log(f"   [update] applied {len(staged)} file(s) -> v{ver}. Restarting...")
     return True
 
 

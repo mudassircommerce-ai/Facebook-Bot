@@ -74,6 +74,23 @@ AREA_CACHE_FILE = os.path.join(APP_DIR, "areas_cache.json")
 REST_EVERY   = 50
 REST_MINUTES = 10
 
+# ── Hang / stall guard ──────────────────────────────────────
+# Kabhi-kabhi bot ek group/page par bina exception ke "atak" jata tha
+# (Facebook ka koi call jawab hi nahi deta) — na crash, na stop, bas ruka
+# rehta. Watchdog har cycle dekhta hai ke aakhri "progress" ko kitna time
+# hua. STALL_RESTART_SEC se zyada ho gaya to browser context band kar deta
+# hai -> main coroutine exception phenkta hai -> run_playwright FRESH browser
+# se khud restart kar leta hai (aaj ke joins safe). Manual restart ki
+# zaroorat nahi.
+STALL_RESTART_SEC   = 360      # 6 min bina kisi progress ke = atka hua
+STALL_MAX_RESTARTS  = 40       # itni baar tak stall-recovery, phir hi haar
+_LAST_ACTIVITY      = time.monotonic()
+
+def _bump_activity():
+    """Joining loop ne abhi kuch kiya — stall-watchdog ka timer reset."""
+    global _LAST_ACTIVITY
+    _LAST_ACTIVITY = time.monotonic()
+
 # Account 1 ke liye purana default page rakha hai (backward compatible).
 # Baaki accounts (2, 3, ...) mein khali rakhte hain — har account ka apna
 # page naam UI mein zaroor type karna hoga.
@@ -2129,9 +2146,11 @@ async def apply_fb_filters(page, city):
 
 async def join_one_group(page, url, name, area, config):
     try:
+        _bump_activity()
         await page.goto(url, wait_until="domcontentloaded", timeout=15000)
         await sleep(rand_delay(1, 2))
         await dismiss_popups(page)
+        _bump_activity()
 
         # ── Account block / checkpoint? -> foran STOP + alert ──
         try:
@@ -2330,6 +2349,7 @@ async def join_one_group(page, url, name, area, config):
 async def search_and_join(page, city, already_joined, config, joined_today=0):
     global CURRENT_CITY
     CURRENT_CITY = city
+    _bump_activity()
     joined  = 0
     skipped = 0
     limit   = config["daily_limit"]
@@ -2428,6 +2448,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
         if stop_event.is_set() or joined_today + joined >= limit:
             break
 
+        _bump_activity()                      # har group = progress (hang-guard)
         name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
         status = await join_one_group(page, group_url, name, city, config)
 
@@ -2456,6 +2477,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
                 _end = time.time() + _rm * 60
                 while time.time() < _end and not stop_event.is_set():
                     await asyncio.sleep(5)
+                    _bump_activity()          # rest = jaan-boojh ke ruk, hang nahi
                 if not stop_event.is_set():
                     send_ui("log", text="▶️ Rest over — resuming.")
 
@@ -2700,6 +2722,8 @@ async def playwright_main(config):
         act = config.get("_activity")
         _integrity_ctr = {"n": 0}
 
+        _bump_activity()   # run shuru — stall timer yahin se
+
         async def _license_watchdog():
             while not stop_event.is_set():
                 await sleep(LICENSE_RECHECK_SEC)
@@ -2710,6 +2734,31 @@ async def playwright_main(config):
                         act.heartbeat()
                     except Exception:
                         pass
+
+                # ── HANG GUARD ──────────────────────────────────
+                # Aakhri progress ko STALL_RESTART_SEC se zyada ho gaya?
+                # Matlab bot kisi page/call par bina exception ke atka hua
+                # hai. Browser context band karo -> main coroutine throw
+                # karega -> run_playwright FRESH browser se khud restart.
+                _stall = time.monotonic() - _LAST_ACTIVITY
+                if _stall >= STALL_RESTART_SEC:
+                    _mins = int(_stall // 60)
+                    send_ui("log", text=f"⏱️ No progress for ~{_mins} min — the page looks "
+                                        f"stuck. Restarting the browser now "
+                                        f"(today's joins are safe, no action needed).")
+                    if act:
+                        try:
+                            act.alert(f"Bot stalled ~{_mins} min on a page — auto-restarting "
+                                      f"the browser. No action needed unless it repeats. "
+                                      f"📞 Contact {BRAND} if it keeps happening.")
+                        except Exception:
+                            pass
+                    config["_stall_restart"] = True
+                    try:
+                        await page.context.close()
+                    except Exception:
+                        pass
+                    return
 
                 # Har ~10 cycle (~20 min): file-tamper check. Ab bot ko ROKTA
                 # NAHI — sirf Discord alert + file ko chup-chaap original se
@@ -2983,6 +3032,363 @@ def run_logout_browser():
         send_ui("logout_done")
 
 
+# ── Auto-post to joined groups (DEV only) ───────────────────
+POSTED_FILE = f"posted_groups{SUFFIX}.txt"
+
+def _load_posted() -> set:
+    try:
+        return set(x.strip() for x in open(POSTED_FILE, encoding="utf-8") if x.strip())
+    except Exception:
+        return set()
+
+def _mark_posted(url: str):
+    try:
+        with open(POSTED_FILE, "a", encoding="utf-8") as f:
+            f.write(url + "\n")
+    except Exception:
+        pass
+
+def _joined_group_urls() -> list:
+    """groups_log{SUFFIX}.csv se woh group URLs jinme Status == joined."""
+    out, seen = [], set()
+    try:
+        with open(LOG_FILE, encoding="utf-8", newline="") as f:
+            for row in csv.reader(f):
+                if len(row) >= 8 and row[7].strip().lower() == "joined":
+                    u = row[4].strip()
+                    if u and u not in seen:
+                        seen.add(u); out.append(u)
+    except Exception:
+        pass
+    return out
+
+
+async def _dismiss_group_gates(page):
+    """Group kholte hi kabhi 'group rules' / 'Next' / 'Got it' / 'I agree'
+    wale interstitials aate hain — unko click karke aage niklo."""
+    for _ in range(6):
+        hit = False
+        for sel in ('div[role="dialog"] div[role="button"]:has-text("Next")',
+                    'div[role="dialog"] div[role="button"]:has-text("Got it")',
+                    'div[role="dialog"] div[role="button"]:has-text("I Agree")',
+                    'div[role="dialog"] div[role="button"]:has-text("I agree")',
+                    'div[role="dialog"] div[role="button"]:has-text("Continue")',
+                    'div[role="dialog"] div[role="button"]:has-text("Done")',
+                    'div[role="dialog"] div[role="button"]:has-text("Agree")'):
+            try:
+                b = page.locator(sel).first
+                if await b.count() and await b.is_visible(timeout=600):
+                    await b.click()
+                    await sleep(rand_delay(0.8, 1.6))
+                    hit = True
+                    break
+            except Exception:
+                continue
+        if not hit:
+            break
+
+
+async def _find_composer_box(page):
+    """Active post-composer ka contenteditable textbox dhoondo — MODAL dialog
+    ya INLINE dono layouts. Comment box ko chhod ke. Nahi mila -> None."""
+    sels = [
+        'div[role="dialog"] div[role="textbox"][contenteditable="true"]',
+        'div[role="textbox"][contenteditable="true"][aria-label*="mind" i]',
+        'div[role="textbox"][contenteditable="true"][aria-label*="write" i]',
+        'div[role="textbox"][contenteditable="true"][aria-label*="discussion" i]',
+        'div[role="textbox"][contenteditable="true"][aria-label*="post" i]',
+        'div[contenteditable="true"][role="textbox"]',
+    ]
+    for sel in sels:
+        try:
+            n = await page.locator(sel).count()
+        except Exception:
+            n = 0
+        for i in range(min(n, 6)):
+            b = page.locator(sel).nth(i)
+            try:
+                if not await b.is_visible():
+                    continue
+                al = (await b.get_attribute("aria-label") or "").lower()
+                ph = (await b.get_attribute("data-placeholder") or "").lower()
+                if "comment" in al or "comment" in ph or "reply" in al:
+                    continue
+                return b
+            except Exception:
+                continue
+    return None
+
+
+async def _click_post_button(page):
+    """Composer ka 'Post' button (dialog ya inline) — visible + enabled."""
+    for ps in ('div[role="dialog"] [aria-label="Post"]',
+               'div[role="dialog"] div[role="button"]:has-text("Post")',
+               '[aria-label="Post"][role="button"]',
+               'div[role="button"][aria-label="Post"]'):
+        try:
+            loc = page.locator(ps)
+            for i in range(min(await loc.count(), 4)):
+                pb = loc.nth(i)
+                if await pb.is_visible():
+                    dis = await pb.get_attribute("aria-disabled")
+                    if dis == "true":
+                        continue
+                    await pb.click()
+                    return True
+        except Exception:
+            continue
+    # last resort: exact-text button
+    try:
+        pb = page.get_by_role("button", name="Post", exact=True).last
+        if await pb.is_visible():
+            await pb.click()
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _post_to_group(page, message: str, image_path: str) -> str:
+    """Group ke 'Create a post' composer se post karo (comment box se NAHI).
+    Return: 'posted' | 'pending' | 'disabled' | 'nocomposer' | 'error'."""
+    try:
+        await _dismiss_group_gates(page)
+        await sleep(rand_delay(1, 2))
+
+        # posting genuinely band? (only admins can post)
+        try:
+            btxt = (await page.inner_text("body"))[:2500].lower()
+            if ("only admins can post" in btxt or "admins have turned off posting" in btxt
+                    or "you can't post in this group" in btxt):
+                return "disabled"
+        except Exception:
+            pass
+
+        # 1) composer trigger ("Write something...", "Start a discussion...")
+        trig = None
+        for sel in ('div[role="button"]:has-text("Write something")',
+                    'div[role="button"]:has-text("Start a discussion")',
+                    'div[role="button"][aria-label*="Create a" i]',
+                    'div[aria-label="Write something..."]',
+                    'div[aria-label="Start a discussion..."]',
+                    'span:has-text("Write something")'):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() and await loc.is_visible(timeout=800):
+                    trig = loc
+                    break
+            except Exception:
+                continue
+        if trig is None:
+            return "nocomposer"
+        try:
+            await trig.click()
+        except Exception:
+            await trig.click(force=True)
+        await sleep(rand_delay(2.5, 4))
+
+        # 2) composer textbox aane ka wait (modal ya inline) — ~10s
+        box = None
+        for _ in range(20):
+            box = await _find_composer_box(page)
+            if box is not None:
+                break
+            await sleep(0.5)
+        if box is None:
+            # dobara trigger try
+            try:
+                await trig.click()
+                await sleep(2)
+                box = await _find_composer_box(page)
+            except Exception:
+                pass
+        if box is None:
+            try: await page.keyboard.press("Escape")
+            except Exception: pass
+            return "nocomposer"
+
+        # 3) type message
+        await box.click()
+        await sleep(0.5)
+        typed = False
+        try:
+            await box.evaluate("(el, t) => { el.focus(); "
+                               "document.execCommand('insertText', false, t); }", message)
+            typed = bool((await box.inner_text() or "").strip())
+        except Exception:
+            typed = False
+        if not typed:
+            try:
+                await box.type(message[:800], delay=5)
+            except Exception:
+                pass
+        await sleep(rand_delay(1.5, 2.5))
+
+        # 4) image attach
+        if image_path and os.path.exists(image_path):
+            try:
+                for pv in ('div[role="dialog"] [aria-label="Photo/video"]',
+                           '[aria-label="Photo/video"]',
+                           'div[role="button"][aria-label*="Photo" i]',
+                           'div[role="button"]:has-text("Photo/video")'):
+                    pb = page.locator(pv).first
+                    if await pb.count() and await pb.is_visible():
+                        await pb.click()
+                        break
+                await sleep(1.3)
+                fi = page.locator('input[type="file"][accept*="image"]').last
+                if not await fi.count():
+                    fi = page.locator('input[type="file"]').last
+                await fi.set_input_files(image_path)
+                await sleep(rand_delay(4, 8))          # upload
+            except Exception:
+                pass
+
+        # 5) Post
+        if not await _click_post_button(page):
+            try: await page.keyboard.press("Escape")
+            except Exception: pass
+            return "error"
+
+        await sleep(rand_delay(3, 6))
+        try:
+            body = (await page.inner_text("body")).lower()
+            if ("pending" in body or "will be visible once" in body
+                    or "sent for review" in body or "awaiting approval" in body):
+                return "pending"
+        except Exception:
+            pass
+        return "posted"
+    except Exception:
+        try: await page.keyboard.press("Escape")
+        except Exception: pass
+        return "error"
+
+
+async def _autopost_main(config):
+    msg   = config.get("post_message", "").strip()
+    img   = config.get("post_image", "")
+    send_ui("log", text="\n📢 Auto-post: launching browser…")
+    posted_set = _load_posted()
+    urls = [u for u in _joined_group_urls() if u not in posted_set]
+    send_ui("log", text=f"   {len(urls)} groups to post in "
+                        f"({len(posted_set)} already done, skipped).")
+    if not urls:
+        send_ui("log", text="   Nothing to post — all joined groups already posted.")
+        send_ui("autopost_done"); return
+
+    done = fails = 0
+    try:
+        async with async_playwright() as p:
+            ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
+                                   extra_args=["--start-maximized"])
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=25000)
+            await sleep(3)
+            await dismiss_popups(page)
+            if await page.locator('[role="navigation"]').count() == 0:
+                send_ui("log", text="❌ Not logged in — open the bot, log in, then retry.")
+                await ctx.close(); send_ui("autopost_done"); return
+
+            plink = (config.get("page_link") or DEFAULT_PAGE_LINK).strip()
+            if plink:
+                await switch_via_link(page, plink, config.get("page_name", ""))
+            await sleep(2)
+
+            _act = config.get("_activity")
+            for i, url in enumerate(urls, 1):
+                if stop_event.is_set():
+                    break
+                gname = url.rstrip("/").split("/")[-1]
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    await sleep(rand_delay(2.5, 4))
+                    await dismiss_popups(page)
+                    await _dismiss_group_gates(page)   # 'group rules' / Next / Got it
+                except Exception:
+                    send_ui("log", text=f"   ↻ {gname}: load failed, will retry next run")
+                    continue
+
+                # Group deleted / privacy badal gayi / link toota — yahan kabhi
+                # post nahi hoga. MARK karke turant agle group par jao (warna
+                # bot yahin atka rehta tha).
+                try:
+                    _bt = (await page.inner_text("body"))[:3000].lower()
+                except Exception:
+                    _bt = ""
+                if ("isn't available at the moment" in _bt
+                        or "content isn't available" in _bt
+                        or "this page isn't available" in _bt
+                        or "page isn't available" in _bt
+                        or "link you followed may be broken" in _bt
+                        or "content not found" in _bt
+                        or "this group is no longer available" in _bt
+                        or "the page you requested cannot be displayed" in _bt):
+                    fails += 1
+                    _mark_posted(url)
+                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] group unavailable "
+                                        f"(deleted/private) — skipped: {gname}")
+                    await sleep(rand_delay(4, 9))
+                    continue
+
+                blk = await check_account_block(page)
+                if blk:
+                    blk = await confirm_account_block(page, blk)
+                if blk:
+                    send_ui("log", text=f"🚫 ACCOUNT BLOCK ({blk}) — stopping auto-post.")
+                    if _act:
+                        try: _act.alert(f"ACCOUNT BLOCK during auto-post ({blk}) — stopped.")
+                        except Exception: pass
+                    config["_end_reason"] = "account_blocked"
+                    stop_event.set()
+                    break
+
+                res = await _post_to_group(page, msg, img)
+                if res in ("posted", "pending"):
+                    done += 1
+                    _mark_posted(url)
+                    send_ui("log", text=f"   ✅ [{i}/{len(urls)}] {res}: {gname}")
+                elif res == "disabled":
+                    fails += 1
+                    _mark_posted(url)     # is group mein members post nahi kar sakte — dobara mat try
+                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] posting disabled (admins only): {gname}")
+                elif res == "nocomposer":
+                    fails += 1            # composer nahi mila — MARK MAT karo, agli run retry
+                    send_ui("log", text=f"   ↻ [{i}/{len(urls)}] composer not found: {gname} (retry next run)")
+                else:
+                    fails += 1
+                    send_ui("log", text=f"   ⚠️ [{i}/{len(urls)}] post failed: {gname} (retry next run)")
+
+                # rest cycle + delay
+                if done and done % 10 == 0 and not stop_event.is_set():
+                    send_ui("log", text="😴 10 posts — resting 5 min…")
+                    _e = time.time() + 300
+                    while time.time() < _e and not stop_event.is_set():
+                        await asyncio.sleep(5)
+                await sleep(rand_delay(8, 12))     # ~10 sec between posts
+
+            await ctx.close()
+    except Exception as e:
+        send_ui("log", text=f"auto-post error: {str(e)[:100]}")
+
+    send_ui("log", text=f"\n■ AUTO-POST DONE — posted {done}, skipped/failed {fails}.")
+    try:
+        _a = config.get("_activity")
+        if _a:
+            _a.alert(f"Auto-post run finished — posted {done}, skipped/failed {fails}.")
+    except Exception:
+        pass
+    send_ui("autopost_done")
+
+
+def run_autopost(config):
+    try:
+        asyncio.run(_autopost_main(config))
+    except Exception as e:
+        send_ui("log", text=f"auto-post error: {str(e)[:100]}")
+        send_ui("autopost_done")
+
+
 # ── Pre-flight check ─────────────────────────────────────────
 async def _preflight_main(config):
     """START se pehle sab kuch verify: license, internet, admin switch,
@@ -3198,6 +3604,7 @@ def run_playwright(config):
                  "service_paused", "login_timeout", "no_page_link",
                  "nothing_left")
     restarts = 0
+    _stall_restarts = 0
     _last_err = ""
     try:
         while True:
@@ -3220,6 +3627,32 @@ def run_playwright(config):
                     break
                 if config.get("_end_reason") in _terminal:
                     break
+
+                # ── Stall-recovery (hang guard ne browser band kiya) ──
+                # Iska apna alag budget hai — ye "crash" nahi, jaan-boojh ke
+                # kiya gaya restart hai. MAX_RESTARTS se alag rakha hai taake
+                # ek din bhar ki susti (slow net) bot ko permanently na roke.
+                if config.pop("_stall_restart", False):
+                    _stall_restarts += 1
+                    if _stall_restarts > STALL_MAX_RESTARTS:
+                        config["_end_reason"] = "error"
+                        _last_err = "page kept stalling — gave up after many browser restarts"
+                        break
+                    for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                        try:
+                            os.remove(os.path.join(PW_PROFILE_DIR, _lk))
+                        except Exception:
+                            pass
+                    send_ui("log", text=f"🔄 Browser was stuck — restarting it "
+                                        f"(recovery {_stall_restarts}). Today's joins are safe, "
+                                        f"joining continues by itself.")
+                    time.sleep(8)
+                    if stop_event.is_set():
+                        config["_end_reason"] = "user_stop"
+                        break
+                    config["_end_reason"] = "completed"
+                    _GEMINI_DEAD_REASON = None
+                    continue
 
                 restarts += 1
                 if restarts > MAX_RESTARTS:
@@ -3370,6 +3803,7 @@ class App:
         self._login_open    = False
         self._logout_open   = False
         self._preflight_open = False
+        self._ap_open       = False
         self._run_start     = None
         self.lic_info       = {"ok": False, "error": "No license", "employee": ""}
 
@@ -4122,14 +4556,99 @@ class App:
         return v
 
     def _auto_post_soon(self):
-        messagebox.showinfo("Auto-post on Page",
-                            "Coming Soon 🚧\n\nAuto-posting to your Facebook Page "
-                            "is not available yet — it'll be added in a future update.")
+        # DEV/ADMIN only — folder mein autopost_dev.txt ho tabhi asli feature.
+        dev = os.path.exists(os.path.join(APP_DIR, "autopost_dev.txt"))
+        if not dev:
+            messagebox.showinfo("Auto-post on Page",
+                                "Coming Soon 🚧\n\nAuto-posting is not available yet — "
+                                "it'll be added in a future update.")
+            return
+        self._open_autopost()
+
+    def _open_autopost(self):
+        if self.running or getattr(self, "_login_open", False) or \
+                getattr(self, "_logout_open", False) or \
+                getattr(self, "_preflight_open", False) or \
+                getattr(self, "_ap_open", False):
+            return
+        dlg = tk.Toplevel(self.root); dlg.title("Auto-post to joined groups (DEV)")
+        dlg.configure(bg=BG); dlg.transient(self.root); dlg.grab_set()
+        dlg.geometry("560x420")
+        tk.Label(dlg, text="Auto-post to ALL joined groups", bg=BG, fg=TXT,
+                 font=F_H2).pack(anchor="w", padx=20, pady=(18, 2))
+        _joined = len(_joined_group_urls()); _pd = len(_load_posted())
+        tk.Label(dlg, text=f"{_joined} joined · {_pd} already posted · "
+                           f"{max(0, _joined - _pd)} to go",
+                 bg=BG, fg=TXT_MUTED, font=F_SMALL).pack(anchor="w", padx=20)
+
+        tk.Label(dlg, text="Post text", bg=BG, fg=TXT_MUTED,
+                 font=F_LABEL).pack(anchor="w", padx=20, pady=(14, 2))
+        txt = scrolledtext.ScrolledText(dlg, height=7, font=F_BODY, bg=INPUT_BG, fg=TXT,
+                                        insertbackground=TXT, relief="flat",
+                                        highlightthickness=1, highlightbackground=BORDER)
+        txt.pack(fill="both", expand=True, padx=20)
+        try:
+            _pm = os.path.join(APP_DIR, "post_message.txt")
+            if os.path.exists(_pm):
+                txt.insert("1.0", open(_pm, encoding="utf-8").read())
+        except Exception:
+            pass
+
+        self._ap_image = ""
+        imgrow = tk.Frame(dlg, bg=BG); imgrow.pack(fill="x", padx=20, pady=(10, 0))
+        img_lbl = tk.Label(imgrow, text="No image chosen", bg=BG, fg=TXT_DIM, font=F_SMALL)
+        def pick_img():
+            p = filedialog.askopenfilename(parent=dlg, title="Choose image",
+                    filetypes=[("Images", "*.jpg *.jpeg *.png *.webp"), ("All", "*.*")])
+            if p:
+                self._ap_image = p
+                img_lbl.config(text=os.path.basename(p), fg=TXT)
+        tk.Button(imgrow, text="Choose image", bg=INPUT_BG, fg=TXT, relief="flat",
+                  font=F_SMALL, cursor="hand2", padx=10, command=pick_img).pack(side="left")
+        img_lbl.pack(side="left", padx=(10, 0))
+
+        brow = tk.Frame(dlg, bg=BG); brow.pack(fill="x", padx=20, pady=16)
+        def start():
+            m = txt.get("1.0", "end").strip()
+            if not m:
+                messagebox.showwarning("Post text", "Enter the post text first.", parent=dlg)
+                return
+            try:
+                open(os.path.join(APP_DIR, "post_message.txt"), "w",
+                     encoding="utf-8").write(m)
+            except Exception:
+                pass
+            self._ap_open = True
+            self._ap_msg = m
+            dlg.destroy()
+            self.btn.config(state="disabled")
+            self.preflight_btn.config(state="disabled")
+            self.login_btn.config(state="disabled")
+            self.logout_btn.config(state="disabled")
+            self.autopost_btn.config(text="📢  Posting…", state="disabled")
+            self.status_var.set("●  Auto-posting to joined groups…")
+            cfg = {
+                "post_message": m,
+                "post_image":   self._ap_image,
+                "page_link":    self.page_link_var.get().strip(),
+                "page_name":    DEFAULT_PAGE_NAME,
+                "employee":     self.lic_info.get("employee", "") or "unknown",
+                "license_key":  lic.load_active_key(),
+            }
+            stop_event.clear()
+            threading.Thread(target=run_autopost, args=(cfg,), daemon=True).start()
+        tk.Button(brow, text="▶  Start posting", bg=GREEN, fg="#08130c", relief="flat",
+                  font=("Segoe UI Semibold", 10), cursor="hand2", padx=16, pady=6,
+                  command=start).pack(side="left")
+        tk.Button(brow, text="Cancel", bg=INPUT_BG, fg=TXT_MUTED, relief="flat",
+                  font=F_SMALL, cursor="hand2", padx=14, pady=6,
+                  command=dlg.destroy).pack(side="right")
 
     def _do_preflight(self):
         if self.running or getattr(self, "_login_open", False) or \
                 getattr(self, "_logout_open", False) or \
-                getattr(self, "_preflight_open", False):
+                getattr(self, "_preflight_open", False) or \
+                getattr(self, "_ap_open", False):
             return
         self._preflight_open = True
         self.preflight_btn.config(text="🔎   Checking…", state="disabled")
@@ -4147,7 +4666,8 @@ class App:
 
     def _open_login(self):
         if self.running or getattr(self, "_logout_open", False) or \
-                getattr(self, "_preflight_open", False):
+                getattr(self, "_preflight_open", False) or \
+                getattr(self, "_ap_open", False):
             return
         if getattr(self, "_login_open", False):
             # dobara dabaya -> login browser band karo
@@ -4166,7 +4686,8 @@ class App:
     def _do_logout(self):
         if self.running or getattr(self, "_login_open", False) or \
                 getattr(self, "_logout_open", False) or \
-                getattr(self, "_preflight_open", False):
+                getattr(self, "_preflight_open", False) or \
+                getattr(self, "_ap_open", False):
             return
         if not messagebox.askyesno(
                 "Log out of Facebook",
@@ -4201,6 +4722,10 @@ class App:
             if getattr(self, "_preflight_open", False):
                 messagebox.showinfo("Pre-flight check",
                                     "Let the pre-flight check finish, then START.")
+                return
+            if getattr(self, "_ap_open", False):
+                messagebox.showinfo("Auto-post",
+                                    "Let the auto-post run finish, then START.")
                 return
             # ── License check — no START without a valid key ──
             info = lic.validate_key(lic.load_active_key())
@@ -4339,6 +4864,15 @@ class App:
                     self.login_btn.config(state="normal")
                     self.logout_btn.config(state="normal")
                     self.status_var.set("●  Pre-flight done — see the log")
+                    self._refresh_license_ui()
+                elif t == "autopost_done":
+                    self._ap_open = False
+                    self.autopost_btn.config(text="📢   Auto-post on Page", state="normal")
+                    self.btn.config(state="normal")
+                    self.preflight_btn.config(state="normal")
+                    self.login_btn.config(state="normal")
+                    self.logout_btn.config(state="normal")
+                    self.status_var.set("●  Auto-post finished — see the log")
                     self._refresh_license_ui()
                 elif t == "stopped":
                     self.running = False
