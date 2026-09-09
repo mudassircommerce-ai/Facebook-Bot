@@ -3756,23 +3756,35 @@ def run_playwright(config):
 
 # ── Tkinter UI ────────────────────────────────────────────────
 
-BG        = "#0c0e13"   # window background (deep dark)
-CARD_BG   = "#161922"   # cards
-CARD_HI   = "#1c202b"   # elevated / hover
-BORDER    = "#2a2f3d"   # borders
-INPUT_BG  = "#1e222c"   # entry fields
-LOG_BG    = "#0a0c11"   # console
-TXT       = "#eef1f6"   # primary text
-TXT_MUTED = "#9aa0b0"   # secondary text
-TXT_DIM   = "#5b6070"   # faint
-FB_BLUE   = "#4c8dff"   # accent
-FB_BLUE_D = "#356fe0"
+# ── NexfourSolution brand palette (Electric Blue + dark) ────
+BG        = "#0b1220"   # window background — deep navy
+CARD_BG   = "#121a2a"   # cards
+CARD_HI   = "#1a2438"   # elevated / hover
+BORDER    = "#26314a"   # borders
+INPUT_BG  = "#182236"   # entry fields
+LOG_BG    = "#080d17"   # console
+TXT       = "#eef2f9"   # primary text
+TXT_MUTED = "#9aa6bd"   # secondary text
+TXT_DIM   = "#5c6884"   # faint
+
+# Brand accent — electric blue
+BRAND_BLUE   = "#3b82f6"
+BRAND_BLUE_D = "#2563eb"   # pressed / hover-dark
+BRAND_BLUE_HI= "#60a5fa"   # highlight / light
+BRAND_INK    = "#08132b"   # text on top of brand blue
+# Back-compat aliases — poore code mein FB_BLUE use hota hai
+FB_BLUE   = BRAND_BLUE
+FB_BLUE_D = BRAND_BLUE_D
+
 GREEN     = "#26d07c"
-GREEN_BG  = "#12241b"
+GREEN_BG  = "#0f2b22"
 GREEN_D   = "#1fae68"
 ORANGE    = "#f5a623"
-ORANGE_BG = "#271f10"
+ORANGE_BG = "#2a2110"
 RED       = "#ff5c5c"
+
+BRAND_NAME_A = "NEXFOUR"    # wordmark (white)
+BRAND_NAME_B = "SOLUTION"   # wordmark (blue)
 
 # ── Typography scale ────────────────────────────────────────
 F_H1    = ("Segoe UI Semibold", 15)
@@ -3787,8 +3799,8 @@ F_MONO  = ("Consolas", 9)
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"FB Group Joiner  v{APP_VERSION}  —  Account {INSTANCE}   ·   "
-                        f"Tool by {BRAND}   ·   build {_build_no()}")
+        self.root.title(f"NexfourSolution  —  FB Group Joiner  v{APP_VERSION}   ·   "
+                        f"Account {INSTANCE}   ·   build {_build_no()}")
         # 2-column layout. Left settings scroll karte hain aur START button
         # left column ke neeche PINNED hai — isliye chhoti screen par bhi
         # START hamesha nazar aata hai.
@@ -4138,12 +4150,60 @@ class App:
                   foreground=[("readonly", TXT)])
         style.configure("FB.Horizontal.TProgressbar",
                         troughcolor=INPUT_BG, bordercolor=BORDER,
-                        background=GREEN, lightcolor=GREEN, darkcolor=GREEN,
+                        background=BRAND_BLUE, lightcolor=BRAND_BLUE, darkcolor=BRAND_BLUE,
                         thickness=14)
         self.root.option_add("*TCombobox*Listbox.background", INPUT_BG)
         self.root.option_add("*TCombobox*Listbox.foreground", TXT)
         self.root.option_add("*TCombobox*Listbox.selectBackground", FB_BLUE)
         self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
+
+    @staticmethod
+    def _round_rect(c, x0, y0, x1, y1, r, **kw):
+        """Rounded-rectangle on a Canvas (smooth polygon)."""
+        r = min(r, (x1 - x0) / 2, (y1 - y0) / 2)
+        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+               x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+        return c.create_polygon(pts, smooth=True, **kw)
+
+    def _brand_mark(self, parent, size=36, bg=None):
+        """NexfourSolution logo mark — 2x2 rounded-tile grid ('four'),
+        top-right tile bright (the 'next'). Drawn crisp on a Canvas."""
+        bg = bg or CARD_BG
+        c = tk.Canvas(parent, width=size, height=size, bg=bg,
+                      highlightthickness=0, bd=0)
+        g  = max(2, round(size * 0.13))        # gap between tiles
+        t  = (size - g) / 2                    # tile side
+        rd = max(2, round(t * 0.28))           # corner radius
+        tiles = {
+            (0, 0): "#1e3a8a",                 # top-left  — deep
+            (1, 0): BRAND_BLUE_HI,             # top-right — bright ("next")
+            (0, 1): BRAND_BLUE_D,              # bottom-left
+            (1, 1): "#1e40af",                 # bottom-right
+        }
+        for (cx, cy), col in tiles.items():
+            x0 = cx * (t + g)
+            y0 = cy * (t + g)
+            self._round_rect(c, x0, y0, x0 + t, y0 + t, rd, fill=col, outline="")
+        return c
+
+    def _hover(self, widget, normal, hot, attr="bg"):
+        """Hover colour swap for a flat button (skips while disabled).
+        `normal` / `hot` may be a colour string or a 0-arg callable."""
+        def _val(v):
+            return v() if callable(v) else v
+        def _on(_e):
+            try:
+                if str(widget["state"]) != "disabled":
+                    widget[attr] = _val(hot)
+            except Exception:
+                pass
+        def _off(_e):
+            try:
+                widget[attr] = _val(normal)
+            except Exception:
+                pass
+        widget.bind("<Enter>", _on)
+        widget.bind("<Leave>", _off)
 
     def _card(self, parent, **pack_opts):
         """Dark card container"""
@@ -4162,8 +4222,11 @@ class App:
         """Settings ke andar chhota section header + divider — visual grouping."""
         if not first:
             tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", pady=(16, 0))
-        tk.Label(parent, text=text, bg=CARD_BG, fg=FB_BLUE,
-                 font=("Segoe UI Semibold", 9)).pack(anchor="w", pady=(12 if not first else 0, 8))
+        r = tk.Frame(parent, bg=CARD_BG)
+        r.pack(fill="x", pady=(12 if not first else 0, 8))
+        tk.Frame(r, bg=BRAND_BLUE, width=3, height=14).pack(side="left", padx=(0, 8))
+        tk.Label(r, text=text, bg=CARD_BG, fg=BRAND_BLUE_HI,
+                 font=("Segoe UI Semibold", 9)).pack(side="left")
 
     def _check(self, parent, text, var):
         """Consistent-styled checkbox."""
@@ -4186,25 +4249,32 @@ class App:
         return e
 
     def _build(self):
-        # ── Header ───────────────────────────────────────────
+        # ── Header  (NexfourSolution brand bar) ──────────────
         hdr = tk.Frame(self.root, bg=CARD_BG)
         hdr.pack(fill="x")
         row = tk.Frame(hdr, bg=CARD_BG)
-        row.pack(fill="x", padx=18, pady=(14, 4))
+        row.pack(fill="x", padx=18, pady=(14, 6))
 
         # logo mark
-        logo = tk.Label(row, text="FB", bg=FB_BLUE, fg="white",
-                        font=("Segoe UI Black", 12), width=3, pady=3)
-        logo.pack(side="left")
-        titlebox = tk.Frame(row, bg=CARD_BG)
-        titlebox.pack(side="left", padx=(10, 0))
-        tk.Label(titlebox, text="FB Group Joiner", bg=CARD_BG, fg=TXT,
-                 font=F_H1).pack(anchor="w")
-        tk.Label(titlebox, text=f"v{APP_VERSION}   ·   Tool by {BRAND}",
-                 bg=CARD_BG, fg=TXT_DIM, font=F_TINY).pack(anchor="w")
+        self._brand_mark(row, size=34, bg=CARD_BG).pack(side="left", pady=1)
 
-        tk.Label(row, text=f"ACCOUNT {INSTANCE}", bg=INPUT_BG, fg=FB_BLUE,
+        titlebox = tk.Frame(row, bg=CARD_BG)
+        titlebox.pack(side="left", padx=(11, 0))
+        wm = tk.Frame(titlebox, bg=CARD_BG)
+        wm.pack(anchor="w")
+        tk.Label(wm, text=BRAND_NAME_A, bg=CARD_BG, fg=TXT,
+                 font=("Segoe UI Black", 13)).pack(side="left")
+        tk.Label(wm, text=BRAND_NAME_B, bg=CARD_BG, fg=BRAND_BLUE_HI,
+                 font=("Segoe UI Black", 13)).pack(side="left", padx=(3, 0))
+        tk.Label(titlebox,
+                 text=f"FB Group Joiner   ·   v{APP_VERSION}   ·   build {_build_no()}",
+                 bg=CARD_BG, fg=TXT_DIM, font=F_TINY).pack(anchor="w", pady=(1, 0))
+
+        tk.Label(row, text=f"ACCOUNT {INSTANCE}", bg=INPUT_BG, fg=BRAND_BLUE_HI,
                  font=("Segoe UI Semibold", 8), padx=10, pady=4).pack(side="right")
+
+        # brand accent strip
+        tk.Frame(hdr, bg=BRAND_BLUE, height=2).pack(fill="x")
 
         self.status_var = tk.StringVar(value="●  Idle — press START to begin")
         self.status_lbl = tk.Label(hdr, textvariable=self.status_var, bg=CARD_BG,
@@ -4268,12 +4338,15 @@ class App:
 
         # ══ LEFT COLUMN — primary START (pinned) + secondary buttons ═══
         self.btn = tk.Button(left, text="▶   START",
-                             bg=GREEN, fg="#08130c",
+                             bg=BRAND_BLUE, fg="white",
                              font=("Segoe UI Semibold", 14),
                              relief="flat", cursor="hand2", bd=0,
-                             activebackground=GREEN_D, activeforeground="#08130c",
+                             activebackground=BRAND_BLUE_D, activeforeground="white",
                              command=self._toggle, pady=13)
         self.btn.pack(side="bottom", fill="x", pady=(10, 0))
+        self._hover(self.btn,
+                    lambda: RED if self.running else BRAND_BLUE,
+                    lambda: "#ff7a7a" if self.running else BRAND_BLUE_HI)
 
         # Secondary: pre-flight check (outlined)
         preflight_row = tk.Frame(left, bg=BG)
@@ -4286,6 +4359,7 @@ class App:
             activebackground=CARD_HI, activeforeground=FB_BLUE,
             command=self._do_preflight, pady=7)
         self.preflight_btn.pack(fill="x")
+        self._hover(self.preflight_btn, CARD_BG, CARD_HI)
 
         # Auto-post on Page (not built yet)
         autopost_row = tk.Frame(left, bg=BG)
@@ -4298,6 +4372,7 @@ class App:
             activebackground=CARD_HI, activeforeground=TXT,
             command=self._auto_post_soon, pady=7)
         self.autopost_btn.pack(fill="x")
+        self._hover(self.autopost_btn, CARD_BG, CARD_HI)
 
         # Tertiary: login / logout (ghost)
         acct_row = tk.Frame(left, bg=BG)
@@ -4469,12 +4544,17 @@ class App:
         # (START button is pinned at the bottom of the left column — created above)
 
         # ══ RIGHT COLUMN — TODAY summary card + Activity + Log ═
-        today = tk.Frame(right, bg=CARD_BG, padx=18, pady=16,
-                         highlightbackground=BORDER, highlightthickness=1)
+        today_wrap = tk.Frame(right, bg=CARD_BG,
+                              highlightbackground=BORDER, highlightthickness=1)
+        today_wrap.pack(fill="x")
+        tk.Frame(today_wrap, bg=BRAND_BLUE, height=2).pack(fill="x")   # top hairline
+        today = tk.Frame(today_wrap, bg=CARD_BG, padx=18, pady=16)
         today.pack(fill="x")
 
         trow = tk.Frame(today, bg=CARD_BG); trow.pack(fill="x")
-        tk.Label(trow, text="TODAY", bg=CARD_BG, fg=TXT_MUTED,
+        _tl = tk.Frame(trow, bg=CARD_BG); _tl.pack(side="left")
+        tk.Frame(_tl, bg=BRAND_BLUE, width=3, height=12).pack(side="left", padx=(0, 7))
+        tk.Label(_tl, text="TODAY", bg=CARD_BG, fg=TXT_MUTED,
                  font=F_LABEL).pack(side="left")
         self.runtime_var = tk.StringVar(value="")
         tk.Label(trow, textvariable=self.runtime_var, bg=CARD_BG, fg=TXT_DIM,
@@ -4484,7 +4564,7 @@ class App:
         self.joined_lbl_var = tk.StringVar(value="0")
         tk.Label(numrow, textvariable=self.joined_lbl_var, bg=CARD_BG, fg=GREEN,
                  font=F_BIG).pack(side="left")
-        self.progress_lbl_var = tk.StringVar(value="/ 250  ·  joined")
+        self.progress_lbl_var = tk.StringVar(value="/ 250   ·   0%  joined")
         tk.Label(numrow, textvariable=self.progress_lbl_var, bg=CARD_BG, fg=TXT_MUTED,
                  font=F_BODY).pack(side="left", anchor="s", pady=(0, 8), padx=(8, 0))
 
@@ -4503,8 +4583,10 @@ class App:
         now_card = tk.Frame(right, bg=CARD_BG, padx=18, pady=12,
                             highlightbackground=BORDER, highlightthickness=1)
         now_card.pack(fill="x", pady=(10, 0))
-        tk.Label(now_card, text="CURRENT ACTIVITY", bg=CARD_BG, fg=TXT_MUTED,
-                 font=F_LABEL).pack(anchor="w", pady=(0, 6))
+        _nh = tk.Frame(now_card, bg=CARD_BG); _nh.pack(anchor="w", pady=(0, 6))
+        tk.Frame(_nh, bg=BRAND_BLUE, width=3, height=12).pack(side="left", padx=(0, 7))
+        tk.Label(_nh, text="CURRENT ACTIVITY", bg=CARD_BG, fg=TXT_MUTED,
+                 font=F_LABEL).pack(side="left")
         self.now_area_var = tk.StringVar(value="Area: —")
         self.now_target_var = tk.StringVar(value="Search: —")
         tk.Label(now_card, textvariable=self.now_area_var, bg=CARD_BG,
@@ -4518,7 +4600,9 @@ class App:
         log_frame.pack(fill="both", expand=True, pady=(10, 0))
         log_hdr = tk.Frame(log_frame, bg=BG)
         log_hdr.pack(fill="x")
-        tk.Label(log_hdr, text="📜  ACTIVITY LOG", bg=BG, fg=TXT_MUTED,
+        _lh = tk.Frame(log_hdr, bg=BG); _lh.pack(side="left")
+        tk.Frame(_lh, bg=BRAND_BLUE, width=3, height=12).pack(side="left", padx=(0, 7))
+        tk.Label(_lh, text="ACTIVITY LOG", bg=BG, fg=TXT_MUTED,
                  font=F_LABEL).pack(side="left")
         tk.Button(log_hdr, text="Clear", font=("Segoe UI", 8),
                   relief="flat", bg=INPUT_BG, fg=TXT_MUTED,
@@ -4534,17 +4618,21 @@ class App:
         self.log_box.tag_config("ok",   foreground=GREEN)
         self.log_box.tag_config("err",  foreground=RED)
         self.log_box.tag_config("warn", foreground=ORANGE)
-        self.log_box.tag_config("head", foreground=FB_BLUE, font=("Consolas", 9, "bold"))
+        self.log_box.tag_config("head", foreground=BRAND_BLUE_HI, font=("Consolas", 9, "bold"))
         self.log_box.tag_config("dim",  foreground=TXT_DIM)
 
         # ── Footer ───────────────────────────────────────────
-        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x")
+        tk.Frame(self.root, bg=BRAND_BLUE, height=2).pack(fill="x")
         foot = tk.Frame(self.root, bg=CARD_BG)
         foot.pack(fill="x")
+        fl = tk.Frame(foot, bg=CARD_BG)
+        fl.pack(side="left", padx=14, pady=5)
+        tk.Label(fl, text="●", bg=CARD_BG, fg=BRAND_BLUE,
+                 font=("Segoe UI", 7)).pack(side="left", padx=(0, 5))
+        tk.Label(fl, text=f"© {datetime.now():%Y} NexfourSolution", bg=CARD_BG,
+                 fg=TXT_MUTED, font=F_TINY).pack(side="left")
         tk.Label(foot, text=f"FB Group Joiner  v{APP_VERSION}   ·   build {_build_no()}",
-                 bg=CARD_BG, fg=TXT_DIM, font=F_TINY).pack(side="left", padx=14, pady=5)
-        tk.Label(foot, text=f"Tool by {BRAND}", bg=CARD_BG, fg=TXT_DIM,
-                 font=F_TINY).pack(side="right", padx=14, pady=5)
+                 bg=CARD_BG, fg=TXT_DIM, font=F_TINY).pack(side="right", padx=14, pady=5)
 
     def _label(self, parent, text):
         tk.Label(parent, text=text, bg=CARD_BG,
@@ -4707,7 +4795,7 @@ class App:
     def _toggle(self):
         if self.running:
             stop_event.set()
-            self.btn.config(text="▶   START", bg=GREEN)
+            self.btn.config(text="▶   START", bg=BRAND_BLUE)
             self.status_var.set("●  Stopping...")
             self.running = False
         else:
@@ -4750,7 +4838,7 @@ class App:
             self._update_stats()
             self.progress["maximum"] = self.daily_limit_var.get()
             self.progress["value"]   = 0
-            self.progress_lbl_var.set(f"/ {self.daily_limit_var.get()}  ·  joined")
+            self.progress_lbl_var.set(self._prog_text())
             self.now_area_var.set("Area: starting…")
             self.now_target_var.set("Search: —")
             self.running = True
@@ -4816,9 +4904,21 @@ class App:
         self.log_box.delete("1.0", "end")
         self.log_box.config(state="disabled")
 
+    def _prog_text(self):
+        try:
+            lim = max(1, int(self.daily_limit_var.get()))
+        except Exception:
+            lim = 250
+        pct = min(100, round(self.joined_today / lim * 100))
+        return f"/ {lim}   ·   {pct}%  joined"
+
     def _update_stats(self):
         self.joined_lbl_var.set(str(self.joined_today))
         self.skipped_lbl_var.set(str(self.skipped_today))
+        try:
+            self.progress_lbl_var.set(self._prog_text())
+        except Exception:
+            pass
 
     def _poll(self):
         try:
@@ -4835,7 +4935,7 @@ class App:
                     self.joined_today = msg["count"]
                     self._update_stats()
                     self.progress["value"] = self.joined_today
-                    self.progress_lbl_var.set(f"/ {self.daily_limit_var.get()}  ·  joined")
+                    self.progress_lbl_var.set(self._prog_text())
                 elif t == "skipped":
                     self.skipped_today += 1
                     self._update_stats()
@@ -4878,7 +4978,7 @@ class App:
                     self.running = False
                     self._login_open = False
                     self._run_start = None
-                    self.btn.config(text="▶   START", bg=GREEN)
+                    self.btn.config(text="▶   START", bg=BRAND_BLUE)
                     self.login_btn.config(
                         text="🔓  Log in to Facebook", state="normal")
                     self.logout_btn.config(state="normal")
