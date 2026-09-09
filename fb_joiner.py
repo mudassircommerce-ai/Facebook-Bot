@@ -100,6 +100,22 @@ DEFAULT_PAGE_NAME = "Edwin Junior" if INSTANCE == "1" else ""
 # dropdown switching se zyada reliable). UI mein bhi change kar sakte ho.
 DEFAULT_PAGE_LINK = ""
 
+# Keyword match ke liye word-boundary lookup — plain "kw in text" substring
+# ka bug tha: chhote keywords doosre lafzon ke andar chhup ke false-positive
+# ban jate the ("cat" -> "vaCATion", "pic" -> "toPIC", "arts" -> "stARTS",
+# "cars" -> "nasCARS"). \b se ab sirf ASAL alag lafz/phrase match hota hai.
+_KW_HIT_CACHE = {}
+
+def _kw_hit(kw: str, text: str) -> bool:
+    k = (kw or "").strip().lower()
+    if not k:
+        return False
+    pat = _KW_HIT_CACHE.get(k)
+    if pat is None:
+        pat = re.compile(r"\b" + re.escape(k) + r"\b")
+        _KW_HIT_CACHE[k] = pat
+    return pat.search(text or "") is not None
+
 # In keywords wale groups KABHI join nahi karne — buy/sell/garage-sale
 # type groups mein service business ka koi faida nahi hota
 BLOCKED_GROUP_KEYWORDS = [
@@ -175,6 +191,18 @@ DEFAULT_DONT_JOIN = [
     "craft beer", "bars and clubs", "nightlife", "brewery",
     # misc
     "barber", "barbershop", "library", "book club", "cat lovers", "kittens",
+    # Muzammil ki naye list (2026-09-09) — broad categories bhi, ab
+    # word-boundary matching ki wajah se safe hain (kw kisi lambe lafz ke
+    # andar chhup ke false-positive nahi banta — "cars" ab "NASCAR" ya
+    # "cat" "vacation" ke andar match nahi karega)
+    "buy & sell", "swap/trade", "jobs & hiring", "business promotion groups",
+    "customer lead groups", "contractor groups", "pets", "lgbtq+",
+    "cars", "cars & coffee", "cars and coffee",
+    "cat", "coffee", "food", "food and drinks", "arts", "bars",
+    "gardener", "gardeners", "gardening", "starting job",
+    "rocks", "pic", "pics", "history", "shop", "supermarket", "offers",
+    "ice fishing", "desi community", "la grange",
+    "home school", "homeschool", "school",
 ]
 
 # Canada ke groups skip karne ke liye — group header mein yeh alfaz hon
@@ -199,12 +227,35 @@ NON_ENGLISH_MARKERS = [
     "somos uma comunidade", "grupo para todos os",
 ]
 
+# Non-Latin scripts — Arabic/Urdu, Hebrew, CJK, Cyrillic, Devanagari, Thai,
+# Greek. Ye scripts English mein KABHI nahi aate, isliye 100% reliable hain —
+# thodi si bhi maujoodgi (min_hits) confirm karti hai group English nahi hai
+# (Spanish/Portuguese ke accented-word check se pehle chalte hain, jyada
+# solid signal).
+_SCRIPT_CHECKS = [
+    ("Arabic script",     re.compile(u'[؀-ۿݐ-ݿ]'), 6),
+    ("Hebrew script",     re.compile(u'[֐-׿]'),              6),
+    ("CJK script",        re.compile(u'[一-鿿぀-ヿ가-힯]'), 6),
+    ("Cyrillic script",   re.compile(u'[Ѐ-ӿ]'),              8),
+    ("Devanagari script", re.compile(u'[ऀ-ॿ]'),              6),
+    ("Thai script",       re.compile(u'[฀-๿]'),              6),
+    ("Greek script",      re.compile(u'[Ͱ-Ͽ]'),              6),
+]
+
 
 def detect_non_english(text: str) -> str:
-    """Header text mein Spanish/Portuguese ke 2+ distinctive alfaz milen
-    to us group ko non-English maano (naam English ho tab bhi)."""
-    t = (text or "").lower()
-    hits = sum(1 for m in NON_ENGLISH_MARKERS if m in t)
+    """Group English nahi hai to reason string, warna khaali string.
+    1) Non-Latin script (Arabic/Hebrew/CJK/Cyrillic/Devanagari/Thai/Greek)
+       thodi si bhi mile -> foran non-English (in scripts mein English
+       kabhi nahi likha jata, false-positive risk zero).
+    2) Warna Spanish/Portuguese ke 2+ distinctive alfaz milen to bhi
+       non-English (naam English ho tab bhi)."""
+    t = text or ""
+    for label, rx, min_hits in _SCRIPT_CHECKS:
+        if len(rx.findall(t)) >= min_hits:
+            return label
+    tl = t.lower()
+    hits = sum(1 for m in NON_ENGLISH_MARKERS if m in tl)
     return "non-English content" if hits >= 2 else ""
 
 JOIN_ANSWERS = [
@@ -1431,7 +1482,7 @@ async def get_group_info(page):
     # na ban jaye)
     header_txt = text[:600].lower()
     is_canada  = any(m in header_txt for m in CANADA_MARKERS)
-    non_english = detect_non_english(text[:1500])
+    non_english = detect_non_english(text[:2500])
     return members, privacy, already, page_blocked, is_canada, post_disabled, non_english
 
 
@@ -2144,7 +2195,22 @@ async def apply_fb_filters(page, city):
 
 # ── Main Join Logic ───────────────────────────────────────────
 
-async def join_one_group(page, url, name, area, config):
+def _min_members_for(config, privacy: str) -> int:
+    """Public aur Private groups ke liye alag-alag min-members threshold.
+    Purane configs mein sirf 'min_members' hota tha — wahi dono ke liye
+    fallback hai. Privacy pata na ho ('?') to dono mein se CHHOTA lo
+    (galti se zyada skip na ho)."""
+    _legacy = config.get("min_members", 1000)
+    pub = int(config.get("min_members_public", _legacy) or 0)
+    pri = int(config.get("min_members_private", _legacy) or 0)
+    if privacy == "Public":
+        return pub
+    if privacy == "Private":
+        return pri
+    return min(pub, pri)
+
+
+async def join_one_group(page, url, name, area, config, already_joined=None):
     try:
         _bump_activity()
         await page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -2157,6 +2223,23 @@ async def join_one_group(page, url, name, area, config):
             body_txt = await page.inner_text("body")
         except Exception:
             body_txt = ""
+
+        # ── FAST already-member exit ─────────────────────────
+        # Ye group pehle se joined hai (manually ya kisi purani run mein)
+        # lekin humari joined_groups.txt mein kabhi save nahi hua tha —
+        # isliye bot HAR run mein isse dobara khol ke waqt zaya karta tha.
+        # body_txt yahan pehle se fetch ho chuka hai (upar), isliye poora
+        # get_group_info() (page.content() sameet, bhaari) chalaye baghair
+        # hi turant nikal jao — aur is baar hamesha ke liye save kar do.
+        if any(m in body_txt for m in
+               ("Leave group", "Joined", "Member ·", "You're a member")):
+            send_ui("log", text=f"⏭️  Already member: {name}")
+            log_csv(area, name, url, "already_member", 0, "?")
+            save_joined(url)
+            if already_joined is not None:
+                already_joined.add(url)
+            return "skipped"
+
         blk = await check_account_block(page, body_txt)
         if blk:
             send_ui("log", text=f"⚠️ Possible block signal ('{blk}') — re-checking in 15s…")
@@ -2199,7 +2282,7 @@ async def join_one_group(page, url, name, area, config):
             title = ""
         check_text = f"{name.lower()} {title}"
         all_blocked = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
-        bad_kw = next((kw for kw in all_blocked if kw and kw in check_text), None)
+        bad_kw = next((kw for kw in all_blocked if kw and _kw_hit(kw, check_text)), None)
         if bad_kw:
             send_ui("log", text=f"⏭️  Blocked keyword ('{bad_kw}'), skip: {name}")
             log_csv(area, name, url, "blocked_keyword", members, privacy)
@@ -2218,10 +2301,14 @@ async def join_one_group(page, url, name, area, config):
         if already:
             send_ui("log", text=f"⏭️  Already member: {name}")
             log_csv(area, name, url, "already_member", members, privacy)
+            save_joined(url)
+            if already_joined is not None:
+                already_joined.add(url)
             return "skipped"
 
-        if members > 0 and members < config["min_members"]:
-            send_ui("log", text=f"⏭️  Skip ({members} members < {config['min_members']}): {name}")
+        _min_req = _min_members_for(config, privacy)
+        if members > 0 and members < _min_req:
+            send_ui("log", text=f"⏭️  Skip ({members} {privacy.lower()} members < {_min_req}): {name}")
             log_csv(area, name, url, "low_members", members, privacy)
             return "skipped"
 
@@ -2418,15 +2505,18 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
         slug = clean.split("/groups/")[-1]
         name = slug.strip("/").replace("-", " ").title()
         # Blocked keyword slug mein? Visit kiye baghair hi chhor do
-        slug_l = slug.replace("-", "").replace("_", "").replace(".", "").lower()
+        # (separators ko SPACE se replace karte hain, strip nahi — taake
+        # word-boundary sahi lage: "vacation-rentals" -> "vacation rentals",
+        # "cat" ab "vacation" ke andar false-match nahi karega)
+        slug_l = re.sub(r"[-_.]+", " ", slug.lower())
         _blk = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
-        if any(kw and kw.replace(" ", "") in slug_l for kw in _blk):
+        if any(kw and _kw_hit(kw, slug_l) for kw in _blk):
             continue
         # Card pe member count likha hai? Chhota group wahin skip karo
         m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members', card_txt or "", re.I)
         card_members = _parse_count(m.group(1)) if m else 0
-        if 0 < card_members < config["min_members"]:
-            card_privacy = "Private" if "Private" in (card_txt or "") else "Public" if "Public" in (card_txt or "") else "?"
+        card_privacy = "Private" if "Private" in (card_txt or "") else "Public" if "Public" in (card_txt or "") else "?"
+        if 0 < card_members < _min_members_for(config, card_privacy):
             log_csv(city, name, clean, "low_members", card_members, card_privacy)
             skipped += 1
             pre_skipped += 1
@@ -2450,7 +2540,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
 
         _bump_activity()                      # har group = progress (hang-guard)
         name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
-        status = await join_one_group(page, group_url, name, city, config)
+        status = await join_one_group(page, group_url, name, city, config, already_joined)
 
         _act = config.get("_activity")
         if status == "blocked":
@@ -4454,12 +4544,16 @@ class App:
         row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
         col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 6))
         col2 = tk.Frame(row1, bg=CARD_BG); col2.pack(side="left", expand=True, fill="x")
-        self._label(col1, "Min members")
-        self.min_members_var = tk.IntVar(value=1000)
-        self._entry(col1, self.min_members_var, pady=(0, 2))
-        self._label(col2, "Daily limit")
+        self._label(col1, "Min Public members")
+        self.min_members_public_var = tk.IntVar(value=1000)
+        self._entry(col1, self.min_members_public_var, pady=(0, 2))
+        self._label(col2, "Min Private members")
+        self.min_members_private_var = tk.IntVar(value=1000)
+        self._entry(col2, self.min_members_private_var, pady=(0, 2))
+
+        self._label(card, "Daily limit")
         self.daily_limit_var = tk.IntVar(value=250)
-        self._entry(col2, self.daily_limit_var, pady=(0, 2))
+        self._entry(card, self.daily_limit_var, pady=(0, 2))
 
         row2 = tk.Frame(card, bg=CARD_BG); row2.pack(fill="x")
         col3 = tk.Frame(row2, bg=CARD_BG); col3.pack(side="left", expand=True, fill="x", padx=(0, 6))
@@ -4851,7 +4945,9 @@ class App:
                 "city":        city,
                 "page_name":   DEFAULT_PAGE_NAME,
                 "page_link":   self.page_link_var.get().strip(),
-                "min_members": self.min_members_var.get(),
+                "min_members": self.min_members_public_var.get(),   # legacy key, back-compat
+                "min_members_public":  self.min_members_public_var.get(),
+                "min_members_private": self.min_members_private_var.get(),
                 "daily_limit": self.daily_limit_var.get(),
                 "delay_min":   self.delay_min_var.get(),
                 "delay_max":   self.delay_max_var.get(),

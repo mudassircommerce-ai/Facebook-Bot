@@ -1,0 +1,263 @@
+# Don't-join keywords - ek per line. Jis group ke naam/title/URL
+# mein ye aaye, join nahi hota.
+# Edit karke apne hisaab se badlo. Buy/sell ka core filter hamesha ON rehta hai.
+buy and sell
+buy sell
+buy/sell
+b/s/t
+bst
+marketplace
+free items
+free item
+free stuff
+free gifts
+free gift
+swap
+trade
+trading post
+selling items
+for sale
+garage sale
+yard sale
+estate sale
+rummage sale
+resale
+re-sale
+classified
+classifieds
+buy nothing
+flea market
+auction
+thrift
+consignment
+bargain
+jobs
+job openings
+now hiring
+hiring
+employment
+careers
+gig work
+business promotion
+promote your business
+business networking
+network marketing
+advertise your business
+advertising
+self promotion
+self-promotion
+shameless plug
+customer leads
+lead generation
+sales leads
+referral group
+contractor
+contractors
+subcontractor
+sub-contractor
+lost and found
+lost & found
+lost pet
+found pet
+missing pet
+lost dog
+lost cat
+finding pets
+pet finder
+rehome
+sports
+soccer
+football
+basketball
+baseball
+softball
+hockey
+tennis
+golf
+volleyball
+cricket
+rugby
+lacrosse
+wrestling
+boxing
+mma
+ufc
+cycling
+running club
+marathon
+crossfit
+pickleball
+bowling league
+fantasy football
+little league
+youth sports
+gaming
+gamers
+video game
+video games
+videogame
+xbox
+playstation
+nintendo
+fortnite
+minecraft
+call of duty
+roblox
+esports
+e-sports
+twitch
+pokemon
+lgbt
+lgbtq
+lgbtqia
+queer
+lesbian
+transgender
+non-binary
+nonbinary
+pride community
+pride month
+gay men
+gay community
+en espanol
+en español
+espanol
+español
+solo espanol
+solo español
+se habla espanol
+hispanohablantes
+comunidad hispana
+grupo hispano
+grupo de
+grupo latino
+latinos
+latinas
+hispano
+hispanos
+hispana
+para hispanos
+amigos latinos
+portugues
+português
+em portugues
+em português
+so portugues
+só português
+falamos portugues
+comunidade brasileira
+brasileiros
+brasileiras
+amigos brasileiros
+grupo brasileiro
+vietnamese community
+chinese community
+grupo chino
+construction
+house rent
+for rent
+houses for rent
+apartments for rent
+rental
+rentals
+roommate
+roommates
+sublet
+real estate
+realtor
+realty
+homes for sale
+property for sale
+house for sale
+mls listings
+landlord
+medicine
+medical
+pharmacy
+pharmaceutical
+doctors
+dentist
+dental
+clinic
+nurses
+healthcare workers
+cars for sale
+car for sale
+used cars
+auto sales
+car sales
+vehicles for sale
+motorcycles for sale
+auto trader
+shoes
+sneakers
+footwear
+clothing
+clothes
+apparel
+fashion resale
+wardrobe
+furniture
+perfume
+fragrance
+accessories
+jewelry for sale
+paintings
+drawings
+art for sale
+artists market
+arts and crafts sale
+coffee lovers
+coffee shop
+bakery
+baked goods
+home bakers
+food lovers
+foodies
+restaurant deals
+alcohol
+wine lovers
+craft beer
+bars and clubs
+nightlife
+brewery
+barber
+barbershop
+library
+book club
+cat lovers
+kittens
+buy & sell
+swap/trade
+jobs & hiring
+business promotion groups
+customer lead groups
+contractor groups
+pets
+lgbtq+
+cars
+cars & coffee
+cars and coffee
+cat
+coffee
+food
+food and drinks
+arts
+bars
+gardener
+gardeners
+gardening
+starting job
+rocks
+pic
+pics
+history
+shop
+supermarket
+offers
+ice fishing
+desi community
+la grange
+home school
+homeschool
+school
