@@ -1,6 +1,6 @@
-# Target areas — har ek ke liye 40 miles radius mein groups search hote hain.
-# Do lists: CAR (car detailing) aur DUCT (duct cleaning). Bot ke interface
-# par "Car / Duct" toggle in mein se ek chunta hai.
+# Target areas — CAR (car detailing) 40 miles radius, DUCT (duct cleaning)
+# 60 miles radius mein groups search hote hain. Bot ke interface par
+# "Car / Duct" toggle in mein se ek chunta hai.
 # Naya area add karne ke baad  scratch_build_cache.py / build_area_cache.py
 # dobara chalao taake areas_cache.json update ho jaye.
 
@@ -59,6 +59,7 @@ CAR_AREAS = [
     "Oklahoma City OK",
     "Charleston SC",
     "Omaha NE",
+    "Rhode Island",
 ]
 
 DUCT_AREAS = [
@@ -103,6 +104,7 @@ DUCT_AREAS = [
     "Knoxville TN",
     "Myrtle Beach SC",
     "Virginia Beach VA",
+    "Rhode Island",
 ]
 
 # Default / backward-compat: kuch purana code sirf AREAS dekhta hai.

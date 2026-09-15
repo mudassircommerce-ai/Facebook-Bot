@@ -1,5 +1,5 @@
 {
- "version": 71,
+ "version": 81,
  "files": {
   "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
   "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
@@ -24,14 +24,14 @@
   "START_8.bat": "139cab9b34a49aad22591b6ae2702772b9225aa3e17c5edf35fe08cb3281adf6",
   "START_9.bat": "08f892b9cd8ab3fcd2c77e206b0cecc51d0c3da42fafb77ef1de25267fc9c164",
   "activity.py": "bd06f569c519f53aad7c328ba043abd7eb9501d4f0ed08e5aecc75f55cd6ca2b",
-  "areas.py": "c2bea6852f7bb7b12fd501e00e00a82ab01e1b6aca99475cb90dabf7b740f9d2",
-  "areas_cache.json": "c5c498e955dee5c1030e166a572b66ed217a0ffad3bf45db73f39d7f5bb4c8a5",
-  "areas_cache_duct.json": "994fb3b0c1ac4d3e3636c84ac147b94460a52db74d239f88d1abd761f1a4e8b9",
+  "areas.py": "202148c14f41af32e6ca95c553d2886824ed756448ed7a24a1bcbf97045c8a17",
+  "areas_cache.json": "d94e1f23c1648b786d8e9b9baf93acbf96c834303608180820bee28555fec355",
+  "areas_cache_duct.json": "293c59ab8ee6b623e63e9ba1dd2b19a5c3911f29f1144d939da3391ab609ded6",
   "block_keywords.txt": "1752f090b4ab002e9c1207b7446e2098543b4d0b1af79e14c9d7c0e6f858bc41",
-  "fb_joiner.py": "0704285121053b2541c7123af516a31a3548a744513d1961cbaf148bb3d288c9",
-  "license_common.py": "5d147f68abcd8d2bf745e35f368eb9e04c4d0be9ccc150708c78246bbdf50e6b",
+  "fb_joiner.py": "d06c2553ac31491c7e445559bdf768f3b6bffa762959a25991f0589f15cd8fb0",
+  "license_common.py": "ef2806dfb7b3887e8f079833ae7b0b0c8ab85aeaacdb940f3ff5ab82a42f9700",
   "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
   "updater.py": "5c939f4b5d887240b984698c1f62f22f8697c146d14a11adfdf88fc5246f73ae"
  },
- "sig": "b-jITAc6ixmjfkjKmBAnB0wocP_dkX10n2TL39Lbw5u9dlvUdI2BvKhu3T1IIq_MHf3oyTktgy_l3ofRR1YBt7Jb2CxyLutle9NPf1JJqZINIZrwKso_xnCIlLBaQrmAWnFAM4v6yeHqXn899xZ_SaZuhK67U9p0I--x2Zi3VQ_IdCdUw9rjmC4MLQK2RyIaMNFxhjB5bLPpEj4BD1Z2ffQYC_iODy36RFfSPXWWNL91S4dt0pGLuNN6ojts6qeTEQzJoY-fCxxrXfgUy2ysnV1NQWqOeEiug3hS2MK1iHs2XJiaAwDihyvTbfoxl8Usme5sO74j3vdCqIKJJxSlxg"
+ "sig": "A7BEbPcK0MLTfLL_aWsCezlBnuAmtxSt3lpy0Oc_OlcFWwqxT3Jws6tG1C0NZpZtvWnMRRHaSLHRu5WxFk0GAFCWd1yTOEh0li6QltV5EitFjLHJsLgW-kor1SSXVFuhdN2rDR8HYiBIzK_nI8ZQLZ2x2vsKzn0_u28ELwmt6e1qjVd8f8pAmLR13Ms1zlgPcNPYpkONdD7D3p8vl5cALOmaDtwNmiMWfiRXp6jaEJupBFMOWMzLu33W5SIyW-ZEe5WFz-Esr3psyzzPoY_JFVKVAOj_ES8WECyXl94cvAry4lL3xIKqiuOauhWfk_NXCp9tnjeJq5NCBrOLbqQTug"
 }

@@ -69,11 +69,6 @@ PW_PROFILE_DIR = os.path.join(APP_DIR, f"pw_profile{SUFFIX}")
 ALL_AREAS_LABEL = "🌎 ALL AREAS (loop through every area in this list)"
 AREA_CACHE_FILE = os.path.join(APP_DIR, "areas_cache.json")
 
-# Rest cycle: har REST_EVERY joins ke baad REST_MINUTES ka rest, phir aage —
-# daily limit tak. (config se override ho sakta hai: rest_every / rest_minutes)
-REST_EVERY   = 50
-REST_MINUTES = 10
-
 # ── Hang / stall guard ──────────────────────────────────────
 # Kabhi-kabhi bot ek group/page par bina exception ke "atak" jata tha
 # (Facebook ka koi call jawab hi nahi deta) — na crash, na stop, bas ruka
@@ -645,7 +640,119 @@ def pick_answer(question_text: str) -> str:
 # select hota hai (local resident persona ke sath match karne ke liye)
 CHECKBOX_PREFERENCE_KEYWORDS = ["yes, i live", "full time", "yes, i", "i live", "yes"]
 
-SEARCH_TEMPLATES = []  # ab use nahi hota
+# Ek area sirf uske bare naam se search karne par FB ke pehle-page results
+# hi milte hain — "har group" (galli-galli ke chhote groups tak) chahiye to
+# alag alag query wording se alag results aate hain. Pass 1 = bare area
+# naam (jaisa pehle tha), Pass 2+ = neeche wale templates ek-ek karke — isi
+# wajah se "0 new joins -> nothing_left" ab bohot der se lagta hai, area
+# genuinely khatam hone tak har wording try ho chuki hoti hai.
+SEARCH_TEMPLATES = [
+    "{area} neighborhood",
+    "{area} residents",
+    "{area} community",
+    "{area} community group",
+    "{area} moms",
+    "{area} families",
+    "{area} homeowners",
+    "{area} local news",
+    "{area} updates",
+    "{area} events",
+    "{area} locals",
+    "{area} network",
+    "{area} connect",
+    "{area} residents group",
+    "{area} town",
+    "{area} chat",
+    "{area} discussion",
+    "{area} bulletin board",
+    "{area} watch",
+    "{area} forum",
+    "{area} hub",
+    "{area} talk",
+    "{area} residents association",
+    "{area} homeowners association",
+    "{area} folks",
+    "{area} people",
+    "{area} living",
+    "{area} area group",
+    "{area} info",
+    "{area} scene",
+    # Muzammil ki 2026-09-10 wali list (94 phrases, deduped/normalized) —
+    # SECOND-LAYER wordings. Normal joining upar wale templates se hi
+    # chalti hai; ye area genuinely khatam hone ke baad (pass 32+) hi
+    # istemal hoti hain, taake bilkul aakhri tak koi group na chhute.
+    "{area} happening",
+    "{area} mom",
+    "{area} local",
+    "{area} parents",
+    "{area} neighbors",
+    "{area} nannies",
+    "{area} what's up",
+    "{area} networking",
+    "{area} if you know",
+    "{area} talking",
+    "{area} chatter",
+    "{area} zip codes",
+    "{area} uncensored",
+    "I love {area}",
+    "Life in {area}",
+    "{area} county",
+    "{area} what's happening",
+    "{area} everything",
+    "{area} talk 2.0",
+    "{area} information",
+    "{area} good news",
+    "{area} live work play",
+    "{area} citizens",
+    "{area} surrounding areas",
+    "{area} friends",
+    "{area} official",
+    "The Voice of {area}",
+    "{area} remember me",
+    "{area} remember when",
+    "{area} the buzz",
+    "{area} informer",
+    "{area} events and news",
+    "{area} conversation",
+    "{area} happens",
+    "{area} what's hot",
+    "{area} community forum",
+    "{area} 411",
+    "{area} stay informed",
+    "{area} unfiltered",
+    "The {area} Times",
+    "{area} being nosey",
+    "{area} city life",
+    "{area} moms only",
+    "Ask {area}",
+    "{area} beach",
+    "{area} beaches",
+    "{area} humble community",
+    "{area} events and social",
+    "{area} unleashed",
+    "{area} area share",
+    "{area} discussion board",
+    "{area} helping",
+    "Welcome to {area}",
+    "{area} no restrictions",
+    "{area} pinboard",
+    "Living in {area}",
+    "{area} real town talk",
+    "{area} subdivision",
+    "{area} ranch",
+    "{area} open forum",
+    "{area} tri-town",
+    "{area} recommended",
+    "{area} the original",
+    "{area} creek",
+    "{area} helping hand",
+    "{area} straight talk",
+    "{area} unite",
+    "{area} together",
+    "{area} uniquely",
+    "{area} unpaused",
+    "{area} past present future",
+]
 
 LOG_FILE         = f"groups_log{SUFFIX}.csv"
 JOINED_FILE      = f"joined_groups{SUFFIX}.txt"
@@ -708,7 +815,7 @@ def load_area_cache(fname: str = None) -> dict:
     except Exception:
         return {}
 
-# CAR areas -> 40-mile cache ;  DUCT areas -> 50-mile cache (alag file)
+# CAR areas -> 40-mile cache ;  DUCT areas -> 60-mile cache (alag file)
 _AREA_CACHE      = load_area_cache()
 _AREA_CACHE_DUCT = load_area_cache(os.path.join(APP_DIR, "areas_cache_duct.json"))
 
@@ -769,27 +876,40 @@ def get_targets_for_area(area: str, same_state_only: bool = True,
     """
     Ek area (e.g. 'Dallas TX') ke liye search targets (cities + counties)
     return karo. Pehle pre-built cache dekho (fast), warna live calculate.
-    mode="duct" -> 50-mile cache (areas_cache_duct.json).
+    mode="duct" -> 60-mile cache (areas_cache_duct.json).
     mode="car"  -> 40-mile cache (areas_cache.json).
     """
-    _c = _AREA_CACHE_DUCT if (mode or "car").lower() == "duct" else _AREA_CACHE
-    cached = _c.get(area) or _AREA_CACHE.get(area)
+    _duct = (mode or "car").lower() == "duct"
+    _c = _AREA_CACHE_DUCT if _duct else _AREA_CACHE
+    # DUCT mode ka apna 60-mile cache hai. Pehle yahan car (40-mile) cache
+    # par fallback tha — duct area agar duct cache mein na ho to chupke se
+    # 40-mile radius chal jata tha. Ab galat radius use nahi hota; cache
+    # miss par neeche live calculate ho jata hai.
+    cached = _c.get(area)
     if cached:
         targets = list(cached.get("cities", []))
         if include_counties:
             targets += list(cached.get("counties", []))
     else:
-        targets = get_nearby_cities(area, 50 if (mode or "").lower() == "duct" else 40)
+        targets = get_nearby_cities(area, 60 if (mode or "").lower() == "duct" else 40)
 
     if same_state_only:
         st = _area_state_code(area)
         if st:
             in_state = [t for t in targets if _target_state(t) == st]
-            # Chhote areas (jaise DC) mein same-state filter ke baad bohot
-            # kam targets bachte hain — us surat mein filter chhoro
+            # Chhote areas (jaise Washington DC) mein same-state filter ke
+            # baad bohot kam targets bachte hain — wahan filter chhor dete
+            # hain, kyunki radius ke andar ke parosi state (VA/MD) waqai
+            # local hain. Lekin caller ko sach bata do (pehle UI "DC only"
+            # likh deta tha jabke 244 targets mein VA/MD sab shamil the).
             if len(in_state) >= 8:
                 targets = in_state
     return targets
+
+
+def states_in_targets(targets: list) -> list:
+    """Targets list mein jo states aaye hain unki sorted list (log ke liye)."""
+    return sorted({s for s in (_target_state(t) for t in targets) if s})
 
 _LAST_CSV_STATUS = ""
 
@@ -806,6 +926,17 @@ def log_csv(area, name, url, status, members="?", privacy="?"):
             datetime.now().strftime("%H:%M:%S"),
             area, name, url, members, privacy, status
         ])
+
+def log_error(what: str, exc: Exception) -> None:
+    """Chhoti si error error_log par likh do (traceback ke sath)."""
+    import traceback
+    try:
+        with open(f"error_log{SUFFIX}.txt", "a", encoding="utf-8") as ef:
+            ef.write(f"\n--- {datetime.now()} | {what} ---\n{exc}\n"
+                     f"{traceback.format_exc()}\n")
+    except Exception:
+        pass
+
 
 def send_ui(msg_type, **kwargs):
     ui_queue.put({"type": msg_type, **kwargs})
@@ -2100,6 +2231,42 @@ STATE_NAMES = {
     "WV":"West Virginia","WI":"Wisconsin","WY":"Wyoming","DC":"District of Columbia",
 }
 
+# Full state name → abbreviation (reverse lookup)
+STATE_ABBR = {v.lower(): k for k, v in STATE_NAMES.items()}
+
+
+def _state_matches(text: str, abbr: str, full: str) -> bool:
+    """Kya `text` (FB ka location suggestion) target state ka hai?
+
+    Full naam ("Arizona") ya abbreviation ko ALAG lafz ki tarah dhoondo.
+    Plain `abbr in text` galat tha — "DE" to "Dedham" ke andar bhi mil
+    jata hai, aur "United States" ko accept karna to kisi bhi state ko
+    pass kar deta tha.
+    """
+    if not text:
+        return False
+    t = text.lower()
+    if full and re.search(r"\b" + re.escape(full.lower()) + r"\b", t):
+        return True
+    if abbr and re.search(r"\b" + re.escape(abbr) + r"\b", text):
+        return True
+    return False
+
+
+def _other_state_in(text: str, abbr: str) -> str:
+    """Agar text mein target ke ilawa kisi DOOSRE US state ka poora naam
+    saaf likha ho to wahi naam wapas do, warna "". Sirf full naam dekhte
+    hain — 2-letter abbreviations normal alfaz se takra jate hain."""
+    t = (text or "").lower()
+    mine = (STATE_NAMES.get(abbr, "") or "").lower()
+    for name in STATE_NAMES.values():
+        low = name.lower()
+        if low == mine:
+            continue
+        if re.search(r"\b" + re.escape(low) + r"\b", t):
+            return name
+    return ""
+
 async def apply_fb_filters(page, city):
     """
     Facebook search page pe left sidebar filters apply karo:
@@ -2109,7 +2276,9 @@ async def apply_fb_filters(page, city):
     await sleep(rand_delay(1, 1.5))
 
     city_name  = city_only(city)   # "Raleigh NC" → "Raleigh"
-    state_abbr = state_only(city)  # "Raleigh NC" → "NC"
+    # "Raleigh NC" → "NC". Agar area sirf state ka naam ho ("Rhode Island",
+    # "New Jersey") to state_only khali deta hai — tab _area_state_code se lo.
+    state_abbr = state_only(city) or _area_state_code(city)
     state_full = STATE_NAMES.get(state_abbr, "")  # "NC" → "North Carolina"
 
     try:
@@ -2145,31 +2314,45 @@ async def apply_fb_filters(page, city):
                 '[role="listbox"] li',
                 'ul[role="listbox"] [role="option"]',
             ]
+            # Suggestion TABHI select karo jab woh USA ke SAHI state ka ho.
+            #
+            # BUG (fixed): pehle "United States" / ", US" bhi accept ho jata
+            # tha — yaani 'Arlington AZ' search karne par FB ka pehla
+            # suggestion "Arlington, Texas" chun liya jata tha aur bot poori
+            # us city ke Texas wale groups join karta rehta tha. Isi wajah se
+            # bot "apni marzi se doosre state" mein join kar raha tha.
+            # Ab state ka match LAAZMI hai; na mile to city skip ho jati hai.
             chosen = False
             for s_sel in suggestion_sels:
                 opts = await page.locator(s_sel).all()
                 if not opts:
                     continue
-                # Sirf USA wala suggestion select karo — state abbreviation
-                # ya full name match hona zaroori hai. Kabhi bhi blindly
-                # pehla option select nahi karna (warna France/kisi aur
-                # country ka wrong location lag jata hai)
+
+                cands = []   # (score, opt, opt_text)
                 for opt in opts:
                     try:
                         opt_text = (await opt.inner_text(timeout=600)).strip()
-                        is_usa = (
-                            (state_abbr and state_abbr in opt_text) or
-                            (state_full and state_full.lower() in opt_text.lower()) or
-                            "United States" in opt_text or
-                            ", US" in opt_text
-                        )
-                        if is_usa:
-                            await opt.click()
-                            await sleep(1)
-                            send_ui("log", text=f"📍 Location: {opt_text.strip()}")
-                            chosen = True
-                            break
-                    except:
+                    except Exception:
+                        continue
+                    if not opt_text:
+                        continue
+                    if not _state_matches(opt_text, state_abbr, state_full):
+                        continue
+                    # Sahi state mil gaya — ab city naam bhi match kare to behtar
+                    first_part = opt_text.split(",")[0].strip().lower()
+                    score = 2 if first_part == city_name.strip().lower() else \
+                            1 if city_name.strip().lower() in first_part else 0
+                    cands.append((score, opt, opt_text))
+
+                if cands:
+                    cands.sort(key=lambda c: c[0], reverse=True)
+                    _score, opt, opt_text = cands[0]
+                    try:
+                        await opt.click()
+                        await sleep(1)
+                        send_ui("log", text=f"📍 Location: {opt_text}")
+                        chosen = True
+                    except Exception:
                         pass
                 if chosen:
                     break
@@ -2184,7 +2367,9 @@ async def apply_fb_filters(page, city):
                     pass
                 await loc_input.press("Control+a")
                 await loc_input.press("Delete")
-                send_ui("log", text=f"   ⚠️  No USA suggestion for '{city_name}'")
+                send_ui("log", text=f"   ⚠️  No '{state_abbr or 'USA'}' suggestion "
+                                    f"for '{city_name}' — doosre state ka "
+                                    f"location nahi lagayenge")
             return chosen
         return False
     except Exception as e:
@@ -2210,35 +2395,71 @@ def _min_members_for(config, privacy: str) -> int:
     return min(pub, pri)
 
 
+def _quota_block(config, privacy: str):
+    """Public/Private ratio quota — kya is privacy ka group abhi skip hona
+    chahiye? (message, csv_status) wapas, warna (None, None).
+
+    Employee set karta hai kitne % public join karne hain (baaqi private).
+    Jo type target se aage nikal jaye usko skip karo jab tak doosra catch
+    up na kare — session bhar mein ratio balance ho jata hai.
+    """
+    pub_pct = config.get("public_pct", 30)
+    jp = config.get("_jp", 0)
+    jv = config.get("_jpriv", 0)
+    tot = jp + jv
+    if privacy == "Public":
+        if pub_pct <= 0:
+            return "100% private set — skip public", "ratio_public"
+        if tot >= 4 and (jp + 1) / (tot + 1) > pub_pct / 100.0 + 0.05:
+            return f"Public quota reached ({jp}/{tot})", "ratio_public"
+    elif privacy == "Private":
+        if pub_pct >= 100:
+            return "100% public set — skip private", "ratio_private"
+        if tot >= 4 and (jv + 1) / (tot + 1) > (100 - pub_pct) / 100.0 + 0.05:
+            return f"Private quota reached ({jv}/{tot})", "ratio_private"
+    return None, None
+
+
+async def _goto_retry(page, url, timeout: int = 20000, tries: int = 2):
+    """page.goto ko ek baar dobara koshish karo.
+
+    Error logs mein sabse zyada yehi fail tha (1000+ baar): 15s ka single
+    attempt: FB ka ek slow response = poora group zaya. Ab pehla attempt
+    fail ho to thoda ruk kar dobara (thoda lamba timeout) try karte hain.
+    Aakhri koshish bhi fail ho to exception upar chala jata hai (caller
+    ka purana behaviour waisa hi rehta hai).
+    """
+    last = None
+    for i in range(max(1, tries)):
+        try:
+            return await page.goto(url, wait_until="domcontentloaded",
+                                   timeout=timeout + i * 10000)
+        except Exception as e:
+            last = e
+            if i + 1 < tries:
+                await sleep(rand_delay(1.5, 3))
+    raise last
+
+
 async def join_one_group(page, url, name, area, config, already_joined=None):
     try:
         _bump_activity()
-        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await _goto_retry(page, url, timeout=20000, tries=2)
         await sleep(rand_delay(1, 2))
         await dismiss_popups(page)
         _bump_activity()
 
         # ── Account block / checkpoint? -> foran STOP + alert ──
+        # SABSE PEHLE ye check hona zaroori hai — kisi aur check se pehle.
+        # (Bug tha: "already member" ka fast-exit isse PEHLE chalta tha, aur
+        # checkpoint/restriction page par kahin bhi "Joined" jaisa generic
+        # lafz mil jaye to wo turant "already member, skip" maan ke agle
+        # group pe chala jata tha — matlab restriction lagne ke baad bhi bot
+        # kabhi rukta hi nahi tha, cheeza-cheeza groups pe chalta rehta tha.)
         try:
             body_txt = await page.inner_text("body")
         except Exception:
             body_txt = ""
-
-        # ── FAST already-member exit ─────────────────────────
-        # Ye group pehle se joined hai (manually ya kisi purani run mein)
-        # lekin humari joined_groups.txt mein kabhi save nahi hua tha —
-        # isliye bot HAR run mein isse dobara khol ke waqt zaya karta tha.
-        # body_txt yahan pehle se fetch ho chuka hai (upar), isliye poora
-        # get_group_info() (page.content() sameet, bhaari) chalaye baghair
-        # hi turant nikal jao — aur is baar hamesha ke liye save kar do.
-        if any(m in body_txt for m in
-               ("Leave group", "Joined", "Member ·", "You're a member")):
-            send_ui("log", text=f"⏭️  Already member: {name}")
-            log_csv(area, name, url, "already_member", 0, "?")
-            save_joined(url)
-            if already_joined is not None:
-                already_joined.add(url)
-            return "skipped"
 
         blk = await check_account_block(page, body_txt)
         if blk:
@@ -2260,6 +2481,22 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             config["_end_reason"] = "account_blocked"
             stop_event.set()
             return "blocked"
+
+        # ── FAST already-member exit ─────────────────────────
+        # Ye group pehle se joined hai (manually ya kisi purani run mein)
+        # lekin humari joined_groups.txt mein kabhi save nahi hua tha —
+        # isliye bot HAR run mein isse dobara khol ke waqt zaya karta tha.
+        # body_txt yahan pehle se fetch ho chuka hai (upar), isliye poora
+        # get_group_info() (page.content() sameet, bhaari) chalaye baghair
+        # hi turant nikal jao — aur is baar hamesha ke liye save kar do.
+        if any(m in body_txt for m in
+               ("Leave group", "Joined", "Member ·", "You're a member")):
+            send_ui("log", text=f"⏭️  Already member: {name}")
+            log_csv(area, name, url, "already_member", 0, "?")
+            save_joined(url)
+            if already_joined is not None:
+                already_joined.add(url)
+            return "skipped"
 
         members, privacy, already, page_blocked, is_canada, post_disabled, non_english = \
             await get_group_info(page)
@@ -2293,6 +2530,32 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             log_csv(area, name, url, "non_usa", members, privacy)
             return "skipped"
 
+        # ── Doosre state ka group? -> skip ──────────────────
+        # Location filter ab sahi state lagata hai, lekin FB kabhi kabhi
+        # phir bhi parosi/door ke groups dikha deta hai. Ye aakhri jaal
+        # hai: agar group ke naam/header mein kisi DOOSRE state ka poora
+        # naam saaf likha ho AUR humare apne state ka koi zikr na ho, to
+        # join mat karo. (Employee ke complaint: "apni marzi se doosre
+        # state mein join kar raha tha".)
+        if config.get("same_state_only", True):
+            _tgt_st = state_only(config.get("_current_city", "") or area) or \
+                      _area_state_code(config.get("_current_city", "") or area)
+            if _tgt_st:
+                _hdr = f"{name} {body_txt[:600]}"
+                _hdr_l = _hdr.lower()
+                # "Washington DC" ko WA (Washington state) mat samajh lena
+                if "washington dc" in _hdr_l or "washington, dc" in _hdr_l \
+                        or "district of columbia" in _hdr_l:
+                    _hdr = re.sub(r"washington(?=[\s,]*d\.?\s?c\.?)", "",
+                                  _hdr, flags=re.I)
+                _mine = _state_matches(_hdr, _tgt_st, STATE_NAMES.get(_tgt_st, ""))
+                _other = "" if _mine else _other_state_in(_hdr, _tgt_st)
+                if _other:
+                    send_ui("log", text=f"🗺️  Doosra state ({_other}), "
+                                        f"{_tgt_st} chahiye — skip: {name}")
+                    log_csv(area, name, url, "wrong_state", members, privacy)
+                    return "skipped"
+
         if non_english:
             send_ui("log", text=f"🌐 Non-English group ({non_english}), skip: {name}")
             log_csv(area, name, url, "non_english", members, privacy)
@@ -2313,36 +2576,12 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             return "skipped"
 
         # ── Public / Private ratio ──────────────────────────
-        # Employee set karta hai kitne % public join karne hain (baaqi private).
-        # Jo type target se aage nikal jaye usko skip karo jab tak doosra
-        # catch up na kare — session bhar mein ratio balance ho jata hai.
-        pub_pct = config.get("public_pct", 30)
-        jp = config.get("_jp", 0)
-        jv = config.get("_jpriv", 0)
-        tot = jp + jv
-        if privacy == "Public":
-            if pub_pct <= 0:
-                send_ui("log", text=f"⚖️  100% private set — skip public: {name}")
-                log_csv(area, name, url, "ratio_public", members, privacy)
-                return "skipped"
-            if tot >= 4 and (jp + 1) / (tot + 1) > pub_pct / 100.0 + 0.05:
-                send_ui("log", text=f"⚖️  Public quota reached ({jp}/{tot}), skip: {name}")
-                log_csv(area, name, url, "ratio_public", members, privacy)
-                return "skipped"
-        elif privacy == "Private":
-            if pub_pct >= 100:
-                send_ui("log", text=f"⚖️  100% public set — skip private: {name}")
-                log_csv(area, name, url, "ratio_private", members, privacy)
-                return "skipped"
-            if tot >= 4 and (jv + 1) / (tot + 1) > (100 - pub_pct) / 100.0 + 0.05:
-                send_ui("log", text=f"⚖️  Private quota reached ({jv}/{tot}), skip: {name}")
-                log_csv(area, name, url, "ratio_private", members, privacy)
-                return "skipped"
+        _qmsg, _qcsv = _quota_block(config, privacy)
+        if _qmsg:
+            send_ui("log", text=f"⚖️  {_qmsg}, skip: {name}")
+            log_csv(area, name, url, _qcsv, members, privacy)
+            return "skipped"
 
-        # Public group mein engagement check karo — neeche scroll kar ke
-        # dekhte hain ke posts pe reactions/comments aa rahe hain ya nahi.
-        # (K/M numbers ab sahi parse hote hain, is liye bade groups pe
-        # bhi chalta hai)
         if privacy == "Public":
             active = await check_group_activity(page)
             if not active:
@@ -2433,7 +2672,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         log_csv(area, name, url, "error")
         return "skipped"
 
-async def search_and_join(page, city, already_joined, config, joined_today=0):
+async def search_and_join(page, city, already_joined, config, joined_today=0, query_variant=0):
     global CURRENT_CITY
     CURRENT_CITY = city
     _bump_activity()
@@ -2448,14 +2687,26 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
 
     # Pura target (city + state, ya county + state) se search — sirf city
     # naam se search karna galat results deta tha
-    query = city
+    # query_variant=0 -> bare area naam (pehle jaisa). 1+ -> SEARCH_TEMPLATES
+    # se alag wording — FB ka search result-set query ke hisaab se badalta
+    # hai, isliye alag wording = naye groups discover hote hain (khaas kar
+    # chhote/hyperlocal groups jo bare naam se top results mein nahi aate).
+    if query_variant and SEARCH_TEMPLATES:
+        tmpl  = SEARCH_TEMPLATES[(query_variant - 1) % len(SEARCH_TEMPLATES)]
+        query = tmpl.format(area=city)
+    else:
+        query = city
     url   = f"https://www.facebook.com/search/groups/?q={query.replace(' ','%20')}"
     send_ui("log", text=f"🔍 Searching: '{query}'")
 
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await _goto_retry(page, url, timeout=20000, tries=2)
         await sleep(rand_delay(1.5, 2.5))
-    except:
+    except Exception as e:
+        # Pehle yahan chup-chaap return ho jata tha — poora target bina
+        # kisi log ke gayab. Ab kam se kam pata to chale.
+        send_ui("log", text=f"   ⚠️  Search page load nahi hui ('{query}') — skip")
+        log_error(f"search goto failed: {query}", e)
         return joined, skipped
 
     # Location filter sirf city search ke liye lagao — county search mein
@@ -2470,10 +2721,28 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
     else:
         send_ui("log", text=f"   ℹ️  County search — skipping location filter")
 
-    # Scroll to load more groups
-    for _ in range(4):
+    # Scroll to load ALL groups for this query — "ek ek gali" ka group bhi
+    # miss na ho. Pehle sirf 4 fixed scrolls the (bas pehla batch), ab jab
+    # tak FB naye results laata rahe scroll karte raho; 2 baar lagataar
+    # koi naya result na aaye to samjho genuinely khatam ho gaya. Max 20
+    # rounds — safety cap, infinite-scroll trap mein hamesha ke liye
+    # atakne se bachao.
+    _prev_n, _stable = -1, 0
+    for _ in range(20):
         await page.keyboard.press("End")
-        await sleep(rand_delay(0.7, 1.2))
+        await sleep(rand_delay(0.8, 1.4))
+        try:
+            _n = await page.evaluate(
+                "document.querySelectorAll('a[href*=\"/groups/\"]').length")
+        except Exception:
+            break
+        if _n <= _prev_n:
+            _stable += 1
+            if _stable >= 2:
+                break
+        else:
+            _stable = 0
+        _prev_n = _n
 
     # Group links + har link ke search-card ka text bhi utha lo — member
     # count wahan pehle se likha hota hai ("12K members" waghera), toh
@@ -2528,18 +2797,39 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
                 except Exception:
                     pass
             continue
-        urls.append(clean)
+        # Card par privacy bhi likhi hoti hai — quota yahin check kar lo
+        urls.append((clean, card_privacy))
 
     if pre_skipped:
         send_ui("log", text=f"   ⚡ {pre_skipped} small groups skipped from search results (not opened)")
     send_ui("log", text=f"   📋 {len(urls)} groups found")
 
-    for group_url in list(urls):
+    for group_url, card_privacy in list(urls):
         if stop_event.is_set() or joined_today + joined >= limit:
             break
 
         _bump_activity()                      # har group = progress (hang-guard)
         name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
+
+        # Ratio quota search-card ki privacy se hi pata chal jata hai —
+        # group kholne ki zaroorat nahi. Pehle har quota-skip par bhi poora
+        # page load hota tha (~20 sec zaya); ek run mein sainkdon aise skip
+        # hote hain, isi liye bot "bohot baad mein" join karta lagta tha.
+        if card_privacy in ("Public", "Private"):
+            _qmsg, _qcsv = _quota_block(config, card_privacy)
+            if _qmsg:
+                send_ui("log", text=f"   ⚖️  {_qmsg}, skip (not opened): {name}")
+                log_csv(city, name, group_url, _qcsv, 0, card_privacy)
+                skipped += 1
+                send_ui("skipped")
+                _qa = config.get("_activity")
+                if _qa:
+                    try:
+                        _qa.record_skip(_qcsv)
+                    except Exception:
+                        pass
+                continue
+
         status = await join_one_group(page, group_url, name, city, config, already_joined)
 
         _act = config.get("_activity")
@@ -2556,20 +2846,6 @@ async def search_and_join(page, city, already_joined, config, joined_today=0):
                     _act.record_join()
                 except Exception:
                     pass
-
-            # ── Rest cycle: har REST_EVERY joins ke baad REST_MINUTES rest ──
-            _re = int(config.get("rest_every", REST_EVERY) or 0)
-            _rm = int(config.get("rest_minutes", REST_MINUTES) or 0)
-            if _re and _rm and _total_now % _re == 0 and _total_now < limit \
-                    and not stop_event.is_set():
-                send_ui("log", text=f"😴 {_total_now} groups joined — resting {_rm} min, "
-                                    f"then continuing (until {limit}).")
-                _end = time.time() + _rm * 60
-                while time.time() < _end and not stop_event.is_set():
-                    await asyncio.sleep(5)
-                    _bump_activity()          # rest = jaan-boojh ke ruk, hang nahi
-                if not stop_event.is_set():
-                    send_ui("log", text="▶️ Rest over — resuming.")
 
         elif status == "skipped":
             skipped += 1
@@ -2898,6 +3174,7 @@ async def playwright_main(config):
                 if not chk["ok"]:
                     send_ui("log", text=f"⛔ License: {chk['error']}")
                     send_ui("log", text="   Bot is stopping — activate a new key and press START again.")
+                    _alert_wrong_pc(chk)
                     config["_end_reason"] = "license_expired"
                     stop_event.set()
                     return
@@ -2970,9 +3247,18 @@ async def playwright_main(config):
                     None, get_targets_for_area, area, _same_state, _inc_counties, _mode)
                 random.shuffle(targets)
                 _st = _area_state_code(area)
-                send_ui("log", text=f"   🗺️  {len(targets)} targets"
-                        + (f" — {_st} only (50-mi radius)" if _same_state and _st
-                           else "")
+                _radius_mi = 60 if (_mode or "").lower() == "duct" else 40
+                # Sach likho: agar radius mein parosi states bhi shamil hain
+                # to unke naam dikhao, "DC only" jaisa jhoot mat bolo.
+                _sts = states_in_targets(targets)
+                if _same_state and _st:
+                    _scope = (f" — {_st} only ({_radius_mi}-mi radius)"
+                              if _sts in ([_st], [])
+                              else f" — {_radius_mi}-mi radius around {_st}"
+                                   f" (states: {', '.join(_sts)})")
+                else:
+                    _scope = ""
+                send_ui("log", text=f"   🗺️  {len(targets)} targets" + _scope
                         + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
 
                 area_joined_start = joined_today
@@ -2981,7 +3267,8 @@ async def playwright_main(config):
                         break
                     config["_current_city"] = target
                     n_joined, n_skipped = await search_and_join(
-                        page, target, already_joined, config, joined_today)
+                        page, target, already_joined, config, joined_today,
+                        query_variant=_pass - 1)
                     joined_today  += n_joined
                     skipped_today += n_skipped
                     total         += n_joined
@@ -3000,7 +3287,7 @@ async def playwright_main(config):
                                     "to join right now. Nothing left — you can run again later.")
                 config["_end_reason"] = "nothing_left"
                 break
-            if _pass >= 25:      # safety — infinite loop se bacho
+            if _pass >= 110:     # safety — infinite loop se bacho (101 templates + bare naam)
                 break
 
         try:
@@ -3480,6 +3767,96 @@ def run_autopost(config):
 
 
 # ── Pre-flight check ─────────────────────────────────────────
+async def _preflight_test_join(page, config) -> tuple:
+    """ASAL ek group dhoond ke join try karo — agar account pe koi
+    restriction (checkpoint/block/pending-limit) pehle se lagi hai to
+    poori session shuru karne se pehle hi pata chal jaye, 100+ groups
+    barbaad karne se pehle.
+    Return: (status, detail)
+      'ok'           -> join ho gaya, koi restriction nahi mili
+      'blocked'      -> restriction confirm hui
+      'no_candidate' -> test ke liye koi group hi nahi mila
+      'error'        -> kuch aur gadbad
+    """
+    try:
+        city = (config.get("city") or "").strip()
+        if not city or city == ALL_AREAS_LABEL:
+            _al = areas_for(config.get("business_mode", "car"))
+            city = random.choice(_al) if _al else "United States"
+
+        query = f"{city} community"
+        url = f"https://www.facebook.com/search/groups/?q={query.replace(' ', '%20')}"
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await sleep(rand_delay(1.5, 2.5))
+        if "County" not in city:
+            try:
+                await apply_fb_filters(page, city)
+            except Exception:
+                pass
+        for _ in range(3):
+            await page.keyboard.press("End")
+            await sleep(rand_delay(0.6, 1.0))
+
+        hrefs = await page.evaluate("""
+            () => {
+                const out = new Set();
+                document.querySelectorAll('a[href*="/groups/"]').forEach(a => {
+                    let href = a.href.split('?')[0].replace(/\\/+$/, '');
+                    if (/\\/groups\\/[a-zA-Z0-9._-]+$/.test(href)) out.add(href);
+                });
+                return [...out];
+            }
+        """)
+        already = load_joined()
+        candidates = [u for u in hrefs if u not in already]
+        random.shuffle(candidates)
+        if not candidates:
+            return ("no_candidate", f"no un-joined group found near '{city}' to test with")
+
+        test_url = candidates[0]
+        name = test_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
+
+        await page.goto(test_url, wait_until="domcontentloaded", timeout=15000)
+        await sleep(rand_delay(1, 2))
+        await dismiss_popups(page)
+        try:
+            body_txt = await page.inner_text("body")
+        except Exception:
+            body_txt = ""
+
+        # Yahan pehle se restriction? -> join try karne ki zaroorat nahi
+        blk = await check_account_block(page, body_txt)
+        if blk:
+            blk = await confirm_account_block(page, blk)
+        if blk:
+            return ("blocked", f"checkpoint/block already active: {blk}")
+
+        clicked = await click_join(page)
+        if not clicked:
+            return ("no_candidate", f"'{name}' had no visible Join button — try again")
+
+        await sleep(rand_delay(2, 3.5))
+        try:
+            after = await page.inner_text("body")
+        except Exception:
+            after = ""
+        if check_pending_limit(after):
+            return ("blocked", "join-request limit already reached (too many pending)")
+        blk2 = await check_account_block(page, after)
+        if blk2:
+            blk2 = await confirm_account_block(page, blk2)
+        if blk2:
+            return ("blocked", f"restricted right after joining: {blk2}")
+
+        # Sab theek — is test-join ko normal join ki tarah save karo
+        # (barbaad nahi hota, humesha ke liye track ho jata hai)
+        log_csv(city, name, test_url, "joined", 0, "?")
+        save_joined(test_url)
+        return ("ok", f"test-joined '{name}' — no restriction detected")
+    except Exception as e:
+        return ("error", str(e)[:80])
+
+
 async def _preflight_main(config):
     """START se pehle sab kuch verify: license, internet, admin switch,
     Gemini keys, Facebook login, page. Log mein green/red report."""
@@ -3578,6 +3955,15 @@ async def _preflight_main(config):
                     page_ok = "/login" not in (pg.url or "").lower()
                 except Exception:
                     page_ok = False
+
+            # 6. Live restriction test — ek asal group dhoond ke join karke
+            #    dekho FB abhi restrict tou nahi kar raha (Muzammil ka hukum:
+            #    poori session shuru karne se pehle hi pata chal jaye).
+            tj_status, tj_detail = None, ""
+            if fb_ok and not blk:
+                send_ui("log", text="   🧪 Testing a real group join (checking for restrictions)…")
+                tj_status, tj_detail = await _preflight_test_join(pg, config)
+
             await ctx.close()
     except Exception as e:
         rows.append(("Browser", "fail", str(e)[:60]))
@@ -3590,6 +3976,14 @@ async def _preflight_main(config):
     if page_ok is not None:
         rows.append(("Page link", "ok" if page_ok else "warn",
                      "opens fine" if page_ok else "won't open — check the URL / admin access"))
+    if tj_status == "ok":
+        rows.append(("Restriction test", "ok", tj_detail))
+    elif tj_status == "blocked":
+        rows.append(("Restriction test", "fail", tj_detail))
+    elif tj_status == "no_candidate":
+        rows.append(("Restriction test", "warn", tj_detail))
+    elif tj_status == "error":
+        rows.append(("Restriction test", "warn", f"could not test: {tj_detail}"))
 
     ic = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
     for lbl, st, dt in rows:
@@ -3620,6 +4014,7 @@ def run_playwright(config):
     if not info["ok"]:
         send_ui("log", text=f"⛔ License invalid: {info['error']}")
         send_ui("log", text=f"   Activate a new key, then press START.  📞 Contact {BRAND}")
+        _alert_wrong_pc(info)
         send_ui("stopped")
         return
 
@@ -4086,6 +4481,7 @@ class App:
             self.lic_lbl.config(fg=ORANGE)
             self.lic_row.pack(fill="x", padx=16, pady=(0, 8))
             self.btn.config(state="disabled")
+            _alert_wrong_pc(info)
 
     def _try_activate(self, key, parent=None):
         """Validate + save a key. Returns (ok, message)."""
@@ -4094,6 +4490,7 @@ class App:
             return False, "Paste a license key first."
         info = lic.validate_key(key)
         if not info["ok"]:
+            _alert_wrong_pc(info)
             return False, info["error"] or "Invalid key."
         lic.save_active_key(key)
         self._refresh_license_ui()
@@ -4576,8 +4973,7 @@ class App:
         self.mix_lbl.pack(side="left", padx=(10, 0))
         e.bind("<KeyRelease>", lambda ev: self._refresh_mix_lbl())
 
-        self._note(card, f"Runs 24/7 · rests {REST_MINUTES} min after every "
-                         f"{REST_EVERY} joins · stops at the daily limit.")
+        self._note(card, "Runs 24/7 non-stop · stops at the daily limit.")
 
         # ── SAFETY FILTERS ──────────────────────────────────
         self._grouphdr(card, "🛡  SAFETY FILTERS")
@@ -4737,17 +5133,34 @@ class App:
         setattr(self, f"{name}_var", v)
         return v
 
+    def _is_admin(self) -> bool:
+        """Auto-post sirf ADMIN license se chalta hai. License RSA-signed hai,
+        isliye employee na naam badal sakta hai na admin flag laga sakta hai.
+        (Pehle yeh check autopost_dev.txt file par tha — koi bhi employee wo
+        file khud bana kar feature unlock kar leta tha.)"""
+        info = self.lic_info if self.lic_info.get("ok") else None
+        if info is None:
+            try:
+                info = lic.validate_key(lic.load_active_key(), check_url=False)
+            except Exception:
+                return False
+        return bool(info.get("ok") and info.get("admin"))
+
     def _auto_post_soon(self):
-        # DEV/ADMIN only — folder mein autopost_dev.txt ho tabhi asli feature.
-        dev = os.path.exists(os.path.join(APP_DIR, "autopost_dev.txt"))
-        if not dev:
-            messagebox.showinfo("Auto-post on Page",
-                                "Coming Soon 🚧\n\nAuto-posting is not available yet — "
-                                "it'll be added in a future update.")
+        if not self._is_admin():
+            messagebox.showinfo(
+                "Auto-post on Page",
+                "🔒  Only for developer\n\n"
+                "Auto-posting admin-only feature hai — yeh sirf admin "
+                "license se chalta hai.\n\nAgar aapko iski zaroorat hai to "
+                "admin se baat karein.")
             return
         self._open_autopost()
 
     def _open_autopost(self):
+        # Doosri safety layer — dialog kabhi bhi non-admin ke liye na khule.
+        if not self._is_admin():
+            return
         if self.running or getattr(self, "_login_open", False) or \
                 getattr(self, "_logout_open", False) or \
                 getattr(self, "_preflight_open", False) or \
@@ -5104,6 +5517,48 @@ def _build_no() -> str:
         return open(os.path.join(APP_DIR, ".update_ver"), encoding="utf-8").read().strip()
     except Exception:
         return "?"
+
+
+_MID_ALERT_FILE = os.path.join(APP_DIR, f".mid_alert{SUFFIX}.json")
+
+def _alert_wrong_pc(info: dict) -> None:
+    """SECURITY: key kisi doosre PC (machine-id) ke liye locked hai lekin
+    yahan use ho rahi hai — matlab ye folder/key kisi aur ko de diya gaya
+    hai ya kisi doosre PC pe chalaya ja raha hai. Owner ko Discord pe
+    FORAN pata chal jata hai — throttled (ek din mein ek hi baar per
+    key, taake retry-loop spam na kare)."""
+    if info.get("error") != "This key was issued for a different PC":
+        return
+    kid = info.get("kid") or "?"
+    try:
+        data = json.load(open(_MID_ALERT_FILE, encoding="utf-8"))
+    except Exception:
+        data = {}
+    last = data.get(kid, "")
+    now = datetime.now()
+    try:
+        if last and (now - datetime.fromisoformat(last)).total_seconds() < 86400:
+            return   # is key ke liye pichle 24h mein already alert ja chuka
+    except Exception:
+        pass
+    data[kid] = now.isoformat(timespec="seconds")
+    try:
+        with open(_MID_ALERT_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+    try:
+        import activity
+        activity.send_alert(
+            info.get("employee") or "unknown",
+            f"🔒 SECURITY: the license for '{info.get('employee') or '?'}' "
+            f"(key {kid}) was opened on an UNAUTHORIZED PC — this machine's "
+            f"fingerprint doesn't match the one it's locked to, bot refused "
+            f"to start. If this isn't {info.get('employee') or 'the assigned employee'}, "
+            f"the folder/key has likely been shared without permission.",
+            sync=True)
+    except Exception:
+        pass
 
 
 def _self_update():

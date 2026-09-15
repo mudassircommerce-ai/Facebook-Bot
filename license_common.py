@@ -44,6 +44,16 @@ UPDATE_URL = "https://raw.githubusercontent.com/mudassircommerce-ai/Facebook-Bot
 KEY_PREFIX = "FBJ1"
 REVO_PREFIX = "REVO1"
 
+# ── Admin / developer capability ───────────────────────────
+# Auto-post jaise developer-only features sirf ADMIN key se chalte hain.
+# Do tareeqe se admin mana jata hai:
+#   1. key payload mein signed  "adm": 1  flag ho (admin_tool se naya key)
+#   2. ya employee ka naam is list mein ho (purani admin keys ke liye)
+# Dono cheezein KEY ke andar hain aur key RSA-signed hai — employee na
+# apna naam badal sakta hai na flag laga sakta hai. (Purana tareeqa
+# autopost_dev.txt file tha, jo koi bhi khud bana kar unlock kar leta.)
+ADMIN_EMPLOYEES = {"admin"}
+
 # License state file — anti clock-rollback ke liye aakhri dekhi hui date
 _STATE_FILE = os.path.join(_base_dir(), ".lic_state")
 # Employee ke PC pe verified key yahan save hoti hai (dubara paste na karna pare)
@@ -185,13 +195,14 @@ def _fmt_left(seconds: float) -> str:
 
 # ── Key banao / parho ──────────────────────────────────────
 def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
-             exp: str = "", machine: str = "") -> str:
+             exp: str = "", machine: str = "", admin: bool = False) -> str:
     """
     Owner side. Give ONE of:
       exp   : 'YYYY-MM-DD' or full ISO 'YYYY-MM-DDTHH:MM:SS'
       hours : valid for N hours from now (supports fractions)
       days  : valid for N days from now
     `machine` empty = runs on any PC; otherwise only that machine-id.
+    `admin`   True = developer-only features (auto-post) is key se chalenge.
     """
     now = datetime.now().replace(microsecond=0)
     if exp:
@@ -213,6 +224,8 @@ def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
         "exp": exp_dt.replace(microsecond=0).isoformat(timespec="seconds"),
         "mid": machine.strip(),
     }
+    if admin:
+        payload["adm"] = 1
     p_b64 = _b64u(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
     sig = _sign(p_b64, priv)
     return f"{KEY_PREFIX}.{p_b64}.{sig}"
@@ -327,7 +340,8 @@ def validate_key(key_str: str, enforce_machine: bool = True,
       days_left : aaj se expiry tak din (int, -ve = expired)
     """
     out = {"ok": False, "error": "", "employee": "", "kid": "", "iat": "",
-           "exp": "", "mid": "", "days_left": 0, "secs_left": 0, "time_left": ""}
+           "exp": "", "mid": "", "days_left": 0, "secs_left": 0, "time_left": "",
+           "admin": False}
 
     if not LICENSE_PUBKEY_N:
         out["error"] = "License system not initialised (admin must run 'Generate Keypair')"
@@ -346,6 +360,11 @@ def validate_key(key_str: str, enforce_machine: bool = True,
     if not _verify(parsed["payload_b64"], parsed["sig"], LICENSE_PUBKEY_N, LICENSE_PUBKEY_E):
         out["error"] = "Key is not genuine (signature check failed)"
         return out
+
+    # Signature verify hone ke BAAD hi admin flag set karo — warna koi
+    # apni marzi ka payload bana kar admin ban sakta tha.
+    out["admin"] = bool(pl.get("adm")) or \
+        (pl.get("emp", "").strip().lower() in ADMIN_EMPLOYEES)
 
     try:
         exp_dt = _parse_dt(pl["exp"], end_of_day=True)
