@@ -12,6 +12,7 @@ import threading
 import asyncio
 import queue
 import csv
+import html as html_mod
 import json
 import random
 import re
@@ -400,6 +401,58 @@ def resolve_block_keywords() -> list:
     return list(DEFAULT_DONT_JOIN)
 
 
+def _kw_to_template(line: str) -> str:
+    """Employee ka keyword -> search template.
+    "{area}" khud likha ho to waisa hi use hota hai, warna area ke aage
+    lag jata hai:  "car detailing" -> "{area} car detailing".
+    """
+    k = (line or "").strip()
+    if not k:
+        return ""
+    return k if "{area}" in k else "{area} " + k
+
+
+def default_search_keyword_lines() -> list:
+    """Default do-join keywords (raw lines):  keywords.txt > code ki list.
+    UI box isi se pre-fill hota hai, taake har employee ko ye pehle se
+    mil jayein aur unhe kuch type na karna pare."""
+    try:
+        fp = os.path.join(APP_DIR, "keywords.txt")
+        if os.path.exists(fp):
+            out = [ln.strip() for ln in open(fp, encoding="utf-8")
+                   if ln.strip() and not ln.strip().startswith("#")]
+            if out:
+                return out
+    except Exception:
+        pass
+    return list(DEFAULT_SEARCH_KEYWORDS)
+
+
+def resolve_search_keywords(ui_val: str = "") -> list:
+    """Search wordings:  UI box  >  keywords.txt  >  built-in SEARCH_TEMPLATES.
+
+    Employee ke apne keywords SAB SE PEHLE try hote hain, built-in list
+    uske baad — taake unke diye hue keywords pehle chalein aur coverage
+    bhi kam na ho. (Pehle apne keywords dene ka koi raasta hi nahi tha:
+    saari queries 101 hardcoded wordings se banti thin.)
+    """
+    raw = ui_val or ""
+    if not raw.strip():
+        raw = "\n".join(default_search_keyword_lines())
+    user, seen = [], set()
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        t = _kw_to_template(ln)
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            user.append(t)
+    if not user:
+        return list(SEARCH_TEMPLATES)
+    return user + [t for t in SEARCH_TEMPLATES if t.lower() not in seen]
+
+
 def resolve_gemini_keys(ui_val: str = "") -> list:
     """UI box > env GEMINI_API_KEY(S) > gemini_keys.txt / gemini_key.txt."""
     keys = _split_keys(ui_val)
@@ -646,6 +699,105 @@ CHECKBOX_PREFERENCE_KEYWORDS = ["yes, i live", "full time", "yes, i", "i live", 
 # naam (jaisa pehle tha), Pass 2+ = neeche wale templates ek-ek karke — isi
 # wajah se "0 new joins -> nothing_left" ab bohot der se lagta hai, area
 # genuinely khatam hone tak har wording try ho chuki hoti hai.
+# Muzammil ki di hui "do-join" list — yehi har bot ki DEFAULT search
+# wordings hain. Priority: UI box > keywords.txt > ye list >
+# built-in SEARCH_TEMPLATES. Code mein isliye rakhi hain ke
+# keywords.txt delete/kharab ho jaye to bhi kaam karti rahein.
+DEFAULT_SEARCH_KEYWORDS = [
+    'Community',
+    'Happening',
+    'Mom',
+    'Local',
+    'Parents',
+    'Neighbors',
+    'Neighborhood',
+    'Nannies',
+    'Discussion',
+    'Network',
+    "What's up",
+    'Networking',
+    'If you know',
+    'Talk',
+    'Talking',
+    'Chatter',
+    'Zip codes',
+    'Uncensored',
+    'I love',
+    'Life in {area}',
+    'Local news',
+    'County',
+    "What's happening",
+    'Everything',
+    'Talk 2.0',
+    'Information',
+    'Good news',
+    'Live/work/play',
+    'Citizens',
+    'Surrounding areas',
+    'You might be',
+    'Friends',
+    'Official',
+    'The voice of {area}',
+    'Remember me',
+    'Remember when',
+    'The buzz',
+    'Events',
+    'Informer',
+    'Event and news',
+    'Town',
+    'Conversation',
+    'Happens',
+    "What's hot",
+    'Community Forum',
+    '411 information original group',
+    'Stay informed',
+    'Unfiltered',
+    'The {area} times',
+    'Being nosey',
+    '{area} life',
+    "Only mom's",
+    'Ask',
+    'Beach',
+    'Beaches',
+    '411 originally info group',
+    'Humble community',
+    'Updates/update',
+    'Folks',
+    'Events and social groups',
+    'unleashed',
+    'Connect',
+    'Area share',
+    'Discussion board',
+    '{area} helping',
+    'Welcome to {area}',
+    'No restrictions',
+    'Pinboard 4.0',
+    'Resident but better',
+    'Bulletin board',
+    'Living in {area}',
+    'Real town talk',
+    'Subdivision',
+    'Ranch',
+    'Open forum',
+    'Tri-town',
+    'Recommended',
+    'The original',
+    'Creek',
+    '411',
+    'Helping hand',
+    'Straight talk',
+    'Unite 2',
+    'Unite',
+    'Together',
+    'Uniquely',
+    'Unpaused',
+    'Past/ present / future',
+]
+
+# Ek area par lagataar itni wordings se 0 naya group mile -> area khatam
+# samjho aur agle area par jao.
+AREA_EMPTY_WORDINGS = 2
+
 SEARCH_TEMPLATES = [
     "{area} neighborhood",
     "{area} residents",
@@ -1584,9 +1736,40 @@ async def handle_questions(page):
 
     return ticked > 0 or answered > 0 or ok
 
+def _extract_group_name(html: str, text: str) -> str:
+    """Group ka ASLI naam page se nikalo.
+
+    Pehle naam sirf URL slug se banta tha — lekin 76% groups ka slug
+    numeric ID hota hai ("939950666418470"), to "don't-join" keyword check
+    ke paas match karne ko kuch hota hi nahi tha aur aise group join ho
+    jate the. og:title / <title> / <h1> se asli naam mil jata hai.
+    """
+    m = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]{2,160})"', html or "")
+    if not m:
+        m = re.search(r'<meta[^>]+content="([^"]{2,160})"[^>]+property="og:title"', html or "")
+    if m:
+        n = html_mod.unescape(m.group(1)).strip()
+        if n and n.lower() not in ("facebook", "log in to facebook"):
+            return n
+
+    m = re.search(r"<title[^>]*>(.{2,200}?)</title>", html or "", re.S)
+    if m:
+        n = html_mod.unescape(m.group(1)).strip()
+        n = re.sub(r"\s*[|\-–]\s*Facebook\s*$", "", n, flags=re.I).strip()
+        if n and n.lower() != "facebook":
+            return n
+
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if 2 < len(ln) < 120 and ln.lower() not in ("facebook", "menu"):
+            return ln
+    return ""
+
+
 async def get_group_info(page):
     html  = await page.content()
     text  = await page.inner_text("body")
+    gname = _extract_group_name(html, text)
     members = 0
     for pat in [r'([\d,]+\.?\d*[KkMm]?)\s*[Mm]embers?', r'"memberCount":([\d]+)']:
         m = re.search(pat, html)
@@ -1614,7 +1797,7 @@ async def get_group_info(page):
     header_txt = text[:600].lower()
     is_canada  = any(m in header_txt for m in CANADA_MARKERS)
     non_english = detect_non_english(text[:2500])
-    return members, privacy, already, page_blocked, is_canada, post_disabled, non_english
+    return members, privacy, already, page_blocked, is_canada, post_disabled, non_english, gname
 
 
 # Account-level block / checkpoint markers (page body text, lowercase)
@@ -1635,12 +1818,22 @@ ACCOUNT_BLOCK_MARKERS = [
     "you cannot use facebook right now",
     "you're doing that too much", "you’re doing that too much",
     "you can't use this feature right now because",
-    "we limit how often you can post",
     "we've restricted certain features", "we have restricted certain features",
     "we detected unusual activity on your account",
     "we noticed suspicious activity on your account",
     "please solve this puzzle", "enter the security code we sent",
 ]
+# Ye markers SIRF POSTING se mutalliq hain — joining par inka koi
+# matlab nahi. Pehle ye ACCOUNT_BLOCK_MARKERS mein the: nateeja ye
+# ke har join ke baad group page par ye lafz mil jate the aur bot
+# 2155 baar "possible block" ka 15-second re-check chalata raha —
+# aur ek baar bhi koi asal block nahi nikla. Ab sirf auto-post ke
+# waqt check hote hain.
+POST_LIMIT_MARKERS = [
+    "we limit how often you can post",
+    "you're posting too fast", "you are posting too fast",
+]
+
 # Sirf join karne ki limit — pending requests bharay hue
 PENDING_LIMIT_MARKERS = [
     "you've reached the limit", "you have reached the limit",
@@ -1652,8 +1845,14 @@ PENDING_LIMIT_MARKERS = [
 ]
 
 
-async def check_account_block(page, body_text: str = None) -> str:
-    """Account checkpoint/block detect. Reason string ya '' return."""
+async def check_account_block(page, body_text: str = None,
+                              include_post_limit: bool = False) -> str:
+    """Account checkpoint/block detect. Reason string ya '' return.
+
+    include_post_limit=True sirf AUTO-POST ke liye — wahan "we limit how
+    often you can post" waqai rukne ki wajah hai. Joining ke waqt ye lafz
+    group ke apne rules/notice mein bhi mil jata hai, isliye default OFF.
+    """
     try:
         if page.url and "/checkpoint/" in page.url:
             return "checkpoint page"
@@ -1664,6 +1863,10 @@ async def check_account_block(page, body_text: str = None) -> str:
     for m in ACCOUNT_BLOCK_MARKERS:
         if m in t:
             return m
+    if include_post_limit:
+        for m in POST_LIMIT_MARKERS:
+            if m in t:
+                return m
     # login page pe redirect = session mar gayi
     if ("log in" in t or "log into facebook" in t) and 'name="pass"' in \
             (await page.content()).lower():
@@ -1676,24 +1879,43 @@ def check_pending_limit(body_text: str) -> bool:
     return any(m in t for m in PENDING_LIMIT_MARKERS)
 
 
-async def confirm_account_block(page, first_marker: str) -> str:
+async def confirm_account_block(page, first_marker: str,
+                                include_post_limit: bool = False) -> str:
     """
     check_account_block ne kuch pakda — lekin bot ko rokne se PEHLE confirm
-    karo ke ye asal block hai, koi 2-second ka temporary Facebook error nahi.
-    ~15s ruk ke page reload kar ke dobara dekho. Marker phir bhi ho -> asal
-    block (reason return). Page theek ho gaya -> '' (bot chalta rahe).
+    karo ke ye asal ACCOUNT block hai, kisi ek group ka notice nahi.
+
+    Pehle ye page.reload() karta tha — aur wahi sab se bari kharabi thi:
+    asli restriction ek dialog/toast hoti hai jo reload karte hi GHAYAB ho
+    jati hai. Isi liye logs mein 2155 "possible block" signals ke bawajood
+    bot EK BAAR bhi nahi ruka.
+
+    Ab do qadam hain:
+      1. Usi page par dobara dekho (reload ke baghair) — dialog wahin hai?
+      2. Phir NEUTRAL page (facebook.com) par ja kar dekho — asal account
+         restriction HAR page par dikhti hai; ek group ka notice nahi.
     """
     try:
         if page.url and "/checkpoint/" in page.url:
             return first_marker            # checkpoint URL = pakka block
-        await sleep(15)
+
+        # 1) usi page par — saboot mita mat do
+        await sleep(5)
+        again = await check_account_block(page, include_post_limit=include_post_limit)
+        if not again:
+            return ""
+
+        # 2) neutral page par tasdeeq
         try:
-            await page.reload(wait_until="domcontentloaded", timeout=20000)
+            await page.goto("https://www.facebook.com/",
+                            wait_until="domcontentloaded", timeout=20000)
+            await sleep(3)
         except Exception:
-            pass
-        await sleep(2)
-        again = await check_account_block(page)
-        return again or ""
+            return again                    # navigate na ho saka -> shak barqarar
+        confirmed = await check_account_block(page, include_post_limit=include_post_limit)
+        if confirmed and "/checkpoint/" in (page.url or ""):
+            return confirmed
+        return confirmed or ""
     except Exception:
         return ""                           # shak ho to bot mat roko
 
@@ -2498,8 +2720,14 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 already_joined.add(url)
             return "skipped"
 
-        members, privacy, already, page_blocked, is_canada, post_disabled, non_english = \
+        members, privacy, already, page_blocked, is_canada, post_disabled, non_english, gname = \
             await get_group_info(page)
+
+        # Page se asli naam mil gaya to usi ko aage use karo — slug wala
+        # naam (aksar sirf numeric ID) na log mein kaam ka tha, na
+        # don't-join keyword check mein.
+        if gname:
+            name = gname
 
         if page_blocked:
             send_ui("log", text=f"⛔ Pages not allowed: {name}")
@@ -2691,8 +2919,9 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
     # se alag wording — FB ka search result-set query ke hisaab se badalta
     # hai, isliye alag wording = naye groups discover hote hain (khaas kar
     # chhote/hyperlocal groups jo bare naam se top results mein nahi aate).
-    if query_variant and SEARCH_TEMPLATES:
-        tmpl  = SEARCH_TEMPLATES[(query_variant - 1) % len(SEARCH_TEMPLATES)]
+    _tmpls = config.get("_search_templates") or SEARCH_TEMPLATES
+    if query_variant and _tmpls:
+        tmpl  = _tmpls[(query_variant - 1) % len(_tmpls)]
         query = tmpl.format(area=city)
     else:
         query = city
@@ -3157,7 +3386,7 @@ async def playwright_main(config):
                 try:
                     blk = await check_account_block(page)
                     if blk:
-                        blk = await confirm_account_block(page, blk)   # 15s re-check
+                        blk = await confirm_account_block(page, blk)
                 except Exception:
                     blk = ""
                 if blk:
@@ -3225,12 +3454,12 @@ async def playwright_main(config):
         # OUTER loop: saare areas khatam ho jayein aur limit bhi na lagi ho
         # to phir se shuru (naye bane groups mil sakte hain). Ek poore pass
         # mein 0 naye join mile -> ab genuinely kuch nahi bacha, tab rukein.
-        _pass = 0
+        _round = 0
         while not stop_event.is_set() and joined_today < limit:
-            _pass += 1
-            _pass_start = joined_today
-            if _pass > 1:
-                send_ui("log", text=f"\n🔁 Pass {_pass} — re-scanning all areas for new groups…")
+            _round += 1
+            _round_start = joined_today
+            if _round > 1:
+                send_ui("log", text=f"\n🔁 Round {_round} — saare areas dobara (naye bane groups ke liye)…")
                 random.shuffle(areas_to_run)
 
             for area_idx, area in enumerate(areas_to_run, 1):
@@ -3262,32 +3491,59 @@ async def playwright_main(config):
                         + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
 
                 area_joined_start = joined_today
-                for target in targets:
-                    if stop_event.is_set() or joined_today >= limit:
+
+                # Is area par ek ke baad ek WORDING chalao — jab tak naye
+                # groups milte rahein. Pehle har area ko sirf EK wording
+                # milti thi aur bot foran agle state par chala jata tha
+                # (isi liye area "bohot jaldi pura" ho jata tha); baaki
+                # 100 wordings agle rounds ke liye reh jati thin, jo aksar
+                # aate hi nahi the.
+                _variant = _round - 1        # round 1 -> bare area naam
+                _empty_streak = 0
+                _wordings = 0
+                while not stop_event.is_set() and joined_today < limit:
+                    _before = joined_today
+                    for target in targets:
+                        if stop_event.is_set() or joined_today >= limit:
+                            break
+                        config["_current_city"] = target
+                        n_joined, n_skipped = await search_and_join(
+                            page, target, already_joined, config, joined_today,
+                            query_variant=_variant)
+                        joined_today  += n_joined
+                        skipped_today += n_skipped
+                        total         += n_joined
+                        total_skipped += n_skipped
+                        save_total(total)
+                        save_total_skipped(total_skipped)
+                        send_ui("total", count=total)
+                        send_ui("total_skipped", count=total_skipped)
+
+                    _wordings += 1
+                    _got = joined_today - _before
+                    if _got:
+                        _empty_streak = 0
+                        send_ui("log", text=f"      ↳ wording {_variant}: +{_got} groups")
+                    else:
+                        _empty_streak += 1
+                        if _empty_streak >= AREA_EMPTY_WORDINGS:
+                            break
+                    _variant += 1
+                    if _variant > len(config.get("_search_templates") or SEARCH_TEMPLATES):
                         break
-                    config["_current_city"] = target
-                    n_joined, n_skipped = await search_and_join(
-                        page, target, already_joined, config, joined_today,
-                        query_variant=_pass - 1)
-                    joined_today  += n_joined
-                    skipped_today += n_skipped
-                    total         += n_joined
-                    total_skipped += n_skipped
-                    save_total(total)
-                    save_total_skipped(total_skipped)
-                    send_ui("total", count=total)
-                    send_ui("total_skipped", count=total_skipped)
+                    random.shuffle(targets)
 
                 area_joined = joined_today - area_joined_start
-                send_ui("log", text=f"   ✅ Area '{area}' done: +{area_joined} groups")
+                send_ui("log", text=f"   ✅ Area '{area}' done: +{area_joined} groups "
+                                    f"({_wordings} wording(s) tried)")
 
             # Poora pass khatam — is pass mein kuch mila?
-            if joined_today - _pass_start == 0:
+            if joined_today - _round_start == 0:
                 send_ui("log", text="\nℹ️ Full pass over all areas found no new groups "
                                     "to join right now. Nothing left — you can run again later.")
                 config["_end_reason"] = "nothing_left"
                 break
-            if _pass >= 110:     # safety — infinite loop se bacho (101 templates + bare naam)
+            if _round >= 110:    # safety — infinite loop se bacho (101 templates + bare naam)
                 break
 
         try:
@@ -3354,11 +3610,47 @@ async def _login_browser_main():
     send_ui("login_done")
 
 
+def _launch_error_hint(e: Exception) -> str:
+    """Browser launch fail hone par employee ko SAAF wajah + hal batao.
+
+    Pehle sirf `str(e)[:80]` dikhta tha — Playwright ka asli message isse
+    kahin lamba hota hai, to employee ko bas "launching error" nazar aata
+    tha aur wajah kabhi pata nahi chalti thi.
+    """
+    s = (str(e) + " " + type(e).__name__).lower()
+    if "executable doesn't exist" in s or "playwright install" in s \
+            or "browsertype.launch" in s and "download" in s:
+        return ("Chromium browser is folder mein install nahi hua.\n"
+                "HAL: is folder mein Command Prompt kholo aur chalao:\n"
+                "       py -m playwright install chromium\n"
+                "   (ya bot band karke START.bat dobara double-click karo)")
+    if "processsingleton" in s or "singletonlock" in s \
+            or "profile appears to be in use" in s or "already in use" in s:
+        return ("Ye profile pehle se kisi aur window mein khuli hai.\n"
+                "HAL: is profile ki saari bot + Chrome windows band karo, "
+                "phir dobara koshish karo.")
+    if "permission" in s or "access is denied" in s:
+        return ("Folder par likhne ki ijazat nahi (permission denied).\n"
+                "HAL: folder ko Desktop/Documents mein rakho (Program Files "
+                "ya OneDrive mein nahi), ya START.bat ko right-click -> "
+                "'Run as administrator'.")
+    if "no such file or directory" in s or "cannot find the path" in s:
+        return ("Folder ki koi file missing hai.\n"
+                "HAL: poora folder dobara copy karo — adhoora copy na ho.")
+    return ""
+
+
 def run_login_browser():
     try:
         asyncio.run(_login_browser_main())
     except Exception as e:
-        send_ui("log", text=f"login browser error: {str(e)[:80]}")
+        # Poori error hamesha error_log mein — support ke liye
+        log_error("login browser launch failed", e)
+        send_ui("log", text=f"❌ Browser launch fail: {str(e)[:300]}")
+        hint = _launch_error_hint(e)
+        if hint:
+            send_ui("log", text=f"💡 {hint}")
+        send_ui("log", text=f"   (poori detail: error_log{SUFFIX}.txt)")
         send_ui("login_done")
 
 
@@ -3708,9 +4000,10 @@ async def _autopost_main(config):
                     await sleep(rand_delay(4, 9))
                     continue
 
-                blk = await check_account_block(page)
+                # Auto-post mein posting-limit bhi rukne ki wajah hai
+                blk = await check_account_block(page, include_post_limit=True)
                 if blk:
-                    blk = await confirm_account_block(page, blk)
+                    blk = await confirm_account_block(page, blk, include_post_limit=True)
                 if blk:
                     send_ui("log", text=f"🚫 ACCOUNT BLOCK ({blk}) — stopping auto-post.")
                     if _act:
@@ -4343,6 +4636,20 @@ class App:
     def _refresh_mix_lbl(self):
         p = self._public_pct()
         self.mix_lbl.config(text=f"→ {p}% public / {100 - p}% private")
+
+    def _search_keywords(self):
+        """UI box se employee ke apne search keywords (raw lines)."""
+        try:
+            txt = self.kw_box.get("1.0", "end")
+        except Exception:
+            txt = ""
+        out, seen = [], set()
+        for ln in txt.splitlines():
+            k = ln.strip()
+            if k and not k.startswith("#") and k.lower() not in seen:
+                seen.add(k.lower())
+                out.append(k)
+        return out
 
     def _block_keywords(self):
         try:
@@ -4985,6 +5292,27 @@ class App:
         self._check(card, "Also join county-level groups", self.include_counties_var)
         self._note(card, "Always on:  USA only · no buy/sell · engagement check")
 
+        self._label(card, "Search keywords  ·  one per line  ·  auto-loads keywords.txt")
+        skrow = tk.Frame(card, bg=CARD_BG)
+        skrow.pack(fill="x", pady=(0, 2))
+        self.kw_box = tk.Text(skrow, height=3, font=F_MONO, bg=INPUT_BG,
+                              fg=TXT, insertbackground=TXT, relief="flat", wrap="word",
+                              highlightthickness=1, highlightbackground=BORDER,
+                              highlightcolor=FB_BLUE)
+        self.kw_box.pack(side="left", fill="both", expand=True)
+        kwscroll = tk.Scrollbar(skrow, command=self.kw_box.yview)
+        kwscroll.pack(side="left", fill="y")
+        self.kw_box.config(yscrollcommand=kwscroll.set)
+        try:
+            self.kw_box.insert("1.0", "\n".join(
+                _s0.get("search_keywords") or default_search_keyword_lines()))
+        except Exception:
+            pass
+        self._note(card, "Khali chhoro = built-in wordings (community, moms, "
+                         "residents…). Apne keywords likho to WOH pehle chalte hain, "
+                         "built-in unke baad. Area khud lag jata hai: "
+                         "\"car detailing\" → \"Phoenix AZ car detailing\".")
+
         self._label(card, "Don't-join keywords  ·  one per line")
         bkrow = tk.Frame(card, bg=CARD_BG)
         bkrow.pack(fill="x", pady=(0, 2))
@@ -5374,6 +5702,9 @@ class App:
                 "same_state_only": bool(self.same_state_var.get()),
                 "include_counties": bool(self.include_counties_var.get()),
                 "custom_blocked": self._block_keywords(),
+                "search_keywords": self._search_keywords(),
+                "_search_templates": resolve_search_keywords(
+                    "\n".join(self._search_keywords())),
                 "business_mode": self.business_var.get(),
             }
             self._persist_gemini()          # remember keys for next time
@@ -5386,6 +5717,7 @@ class App:
             s["same_state_only"] = bool(self.same_state_var.get())
             s["include_counties"] = bool(self.include_counties_var.get())
             s["block_keywords"] = self._block_keywords()
+            s["search_keywords"] = self._search_keywords()
             save_settings(s)
             self._refresh_gemini_status()
             threading.Thread(target=run_playwright, args=(config,), daemon=True).start()

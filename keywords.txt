@@ -1,0 +1,101 @@
+# Search keywords (DO-join) - ek per line.
+# Bot pehle apna normal search karta hai (sirf area naam),
+# phir in keywords se usi state mein aage joining karta hai.
+# Area khud aage lag jata hai:  Community -> Phoenix AZ Community
+# {area} khud likha ho to wahin lagta hai: Life in {area} -> Life in Phoenix AZ
+#
+Community
+Happening
+Mom
+Local
+Parents
+Neighbors
+Neighborhood
+Nannies
+Discussion
+Network
+What's up
+Networking
+If you know
+Talk
+Talking
+Chatter
+Zip codes
+Uncensored
+I love
+Life in {area}
+Local news
+County
+What's happening
+Everything
+Talk 2.0
+Information
+Good news
+Live/work/play
+Citizens
+Surrounding areas
+You might be
+Friends
+Official
+The voice of {area}
+Remember me
+Remember when
+The buzz
+Events
+Informer
+Event and news
+Town
+Conversation
+Happens
+What's hot
+Community Forum
+411 information original group
+Stay informed
+Unfiltered
+The {area} times
+Being nosey
+{area} life
+Only mom's
+Ask
+Beach
+Beaches
+411 originally info group
+Humble community
+Updates/update
+Folks
+Events and social groups
+unleashed
+Connect
+Area share
+Discussion board
+{area} helping
+Welcome to {area}
+No restrictions
+Pinboard 4.0
+Resident but better
+Bulletin board
+Living in {area}
+Real town talk
+Subdivision
+Ranch
+Open forum
+Tri-town
+Recommended
+The original
+Creek
+411
+Helping hand
+Straight talk
+Unite 2
+Unite
+Together
+Uniquely
+Unpaused
+Past/ present / future
+#
+# --- ye confirm karni hain (abhi OFF hain) ---
+# City or state
+# Surprising County
+# Hull mass
+# Mass
+# City in promise
