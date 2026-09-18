@@ -2602,43 +2602,19 @@ async def apply_fb_filters(page, city):
 
 # ── Main Join Logic ───────────────────────────────────────────
 
-def _min_members_for(config, privacy: str) -> int:
-    """Public aur Private groups ke liye alag-alag min-members threshold.
-    Purane configs mein sirf 'min_members' hota tha — wahi dono ke liye
-    fallback hai. Privacy pata na ho ('?') to dono mein se CHHOTA lo
-    (galti se zyada skip na ho)."""
-    _legacy = config.get("min_members", 1000)
-    pub = int(config.get("min_members_public", _legacy) or 0)
-    pri = int(config.get("min_members_private", _legacy) or 0)
-    if privacy == "Public":
-        return pub
-    if privacy == "Private":
-        return pri
-    return min(pub, pri)
+def _wrong_type(config, privacy: str):
+    """Employee ne "sirf private" ya "sirf public" chuna hai — us se alag
+    type ka group skip. (message, csv_status) wapas, warna (None, None).
 
-
-def _quota_block(config, privacy: str):
-    """Public/Private ratio quota — kya is privacy ka group abhi skip hona
-    chahiye? (message, csv_status) wapas, warna (None, None).
-
-    Employee set karta hai kitne % public join karne hain (baaqi private).
-    Jo type target se aage nikal jaye usko skip karo jab tak doosra catch
-    up na kare — session bhar mein ratio balance ho jata hai.
+    Pehle yahan public/private ka PERCENTAGE quota tha (public_pct). Ab
+    sirf ek chunao hai, isliye hisaab-kitab ki zaroorat nahi. Privacy
+    pata na chale ('Unknown') to skip MAT karo — join kar lo.
     """
-    pub_pct = config.get("public_pct", 30)
-    jp = config.get("_jp", 0)
-    jv = config.get("_jpriv", 0)
-    tot = jp + jv
-    if privacy == "Public":
-        if pub_pct <= 0:
-            return "100% private set — skip public", "ratio_public"
-        if tot >= 4 and (jp + 1) / (tot + 1) > pub_pct / 100.0 + 0.05:
-            return f"Public quota reached ({jp}/{tot})", "ratio_public"
-    elif privacy == "Private":
-        if pub_pct >= 100:
-            return "100% public set — skip private", "ratio_private"
-        if tot >= 4 and (jv + 1) / (tot + 1) > (100 - pub_pct) / 100.0 + 0.05:
-            return f"Private quota reached ({jv}/{tot})", "ratio_private"
+    want = (config.get("join_type") or "private").lower()
+    if privacy == "Public" and want != "public":
+        return "Sirf private set hai", "ratio_public"
+    if privacy == "Private" and want != "private":
+        return "Sirf public set hai", "ratio_private"
     return None, None
 
 
@@ -2797,14 +2773,9 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 already_joined.add(url)
             return "skipped"
 
-        _min_req = _min_members_for(config, privacy)
-        if members > 0 and members < _min_req:
-            send_ui("log", text=f"⏭️  Skip ({members} {privacy.lower()} members < {_min_req}): {name}")
-            log_csv(area, name, url, "low_members", members, privacy)
-            return "skipped"
-
-        # ── Public / Private ratio ──────────────────────────
-        _qmsg, _qcsv = _quota_block(config, privacy)
+        # ────────────── Sirf private / sirf public ──────────────
+        # (min-members ka filter hata diya gaya - har size ka group chalega)
+        _qmsg, _qcsv = _wrong_type(config, privacy)
         if _qmsg:
             send_ui("log", text=f"⚖️  {_qmsg}, skip: {name}")
             log_csv(area, name, url, _qcsv, members, privacy)
@@ -2865,14 +2836,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         await select_page(page, config.get("page_name", ""))
         await handle_questions(page)
 
-        if privacy == "Public":
-            config["_jp"] = config.get("_jp", 0) + 1
-        elif privacy == "Private":
-            config["_jpriv"] = config.get("_jpriv", 0) + 1
-        _jp, _jv = config.get("_jp", 0), config.get("_jpriv", 0)
-        _tt = _jp + _jv
-        _mix = f" | mix {round(100*_jp/_tt)}% pub / {round(100*_jv/_tt)}% priv" if _tt else ""
-        send_ui("log", text=f"✅ Joined: {name} ({members} members | {privacy}){_mix}")
+        send_ui("log", text=f"✅ Joined: {name} ({members} members | {privacy})")
         log_csv(area, name, url, "joined", members, privacy)
         save_joined(url)
         return "joined"
@@ -2996,7 +2960,6 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
     """)
 
     urls = []
-    pre_skipped = 0
     for clean, card_txt in cards.items():
         if clean in already_joined:
             continue
@@ -3010,27 +2973,10 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         _blk = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
         if any(kw and _kw_hit(kw, slug_l) for kw in _blk):
             continue
-        # Card pe member count likha hai? Chhota group wahin skip karo
-        m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members', card_txt or "", re.I)
-        card_members = _parse_count(m.group(1)) if m else 0
+        # Card se privacy uthao (member-count ka filter hata diya gaya)
         card_privacy = "Private" if "Private" in (card_txt or "") else "Public" if "Public" in (card_txt or "") else "?"
-        if 0 < card_members < _min_members_for(config, card_privacy):
-            log_csv(city, name, clean, "low_members", card_members, card_privacy)
-            skipped += 1
-            pre_skipped += 1
-            send_ui("skipped")
-            _pa = config.get("_activity")
-            if _pa:
-                try:
-                    _pa.record_skip("low_members")
-                except Exception:
-                    pass
-            continue
-        # Card par privacy bhi likhi hoti hai — quota yahin check kar lo
         urls.append((clean, card_privacy))
 
-    if pre_skipped:
-        send_ui("log", text=f"   ⚡ {pre_skipped} small groups skipped from search results (not opened)")
     send_ui("log", text=f"   📋 {len(urls)} groups found")
 
     for group_url, card_privacy in list(urls):
@@ -3040,12 +2986,12 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         _bump_activity()                      # har group = progress (hang-guard)
         name = group_url.split("/groups/")[-1].strip("/").replace("-", " ").title()
 
-        # Ratio quota search-card ki privacy se hi pata chal jata hai —
-        # group kholne ki zaroorat nahi. Pehle har quota-skip par bhi poora
+        # Type (private/public) search-card se hi pata chal jata hai -
+        # group kholne ki zaroorat nahi. Pehle har aise skip par bhi poora
         # page load hota tha (~20 sec zaya); ek run mein sainkdon aise skip
         # hote hain, isi liye bot "bohot baad mein" join karta lagta tha.
         if card_privacy in ("Public", "Private"):
-            _qmsg, _qcsv = _quota_block(config, card_privacy)
+            _qmsg, _qcsv = _wrong_type(config, card_privacy)
             if _qmsg:
                 send_ui("log", text=f"   ⚖️  {_qmsg}, skip (not opened): {name}")
                 log_csv(city, name, group_url, _qcsv, 0, card_privacy)
@@ -4335,11 +4281,8 @@ def run_playwright(config):
     send_ui("log", text=(f"🤖 AI answers ON ({GEMINI_MODEL}) — {len(GEMINI_KEYS)} key(s) in rotation")
             if GEMINI_KEYS else "💬 AI answers OFF — using built-in template answers")
 
-    # ── Public/Private target + filters (session-wide counters) ──
-    config["_jp"] = 0
-    config["_jpriv"] = 0
-    _pp = config.get("public_pct", 30)
-    send_ui("log", text=f"🎯 Target mix: {_pp}% public / {100 - _pp}% private"
+    _jt = (config.get("join_type") or "private").lower()
+    send_ui("log", text=f"🎯 Sirf {_jt.upper()} groups join honge"
             + ("  ·  skip no-post groups" if config.get("skip_no_post", True) else ""))
     if config.get("custom_blocked"):
         send_ui("log", text="   ⛔ Extra blocked keywords: "
@@ -4600,7 +4543,6 @@ class App:
         self._style()
         self._build()
         self._refresh_gemini_status()
-        self._refresh_mix_lbl()
         self._refresh_license_ui()             # fast, local-only check
         self._license_gate()                   # <-- ask for a key BEFORE anything else
         if self._alive():
@@ -4627,16 +4569,6 @@ class App:
             return raw  # plain key string
 
     # ── Targeting UI ────────────────────────────────────────
-    def _public_pct(self):
-        try:
-            return max(0, min(100, int(self.public_pct_var.get())))
-        except Exception:
-            return 30
-
-    def _refresh_mix_lbl(self):
-        p = self._public_pct()
-        self.mix_lbl.config(text=f"→ {p}% public / {100 - p}% private")
-
     def _search_keywords(self):
         """UI box se employee ke apne search keywords (raw lines)."""
         try:
@@ -5245,16 +5177,6 @@ class App:
 
         # ── LIMITS & SPEED ──────────────────────────────────
         self._grouphdr(card, "⏱  LIMITS & SPEED")
-        row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
-        col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 6))
-        col2 = tk.Frame(row1, bg=CARD_BG); col2.pack(side="left", expand=True, fill="x")
-        self._label(col1, "Min Public members")
-        self.min_members_public_var = tk.IntVar(value=1000)
-        self._entry(col1, self.min_members_public_var, pady=(0, 2))
-        self._label(col2, "Min Private members")
-        self.min_members_private_var = tk.IntVar(value=1000)
-        self._entry(col2, self.min_members_private_var, pady=(0, 2))
-
         self._label(card, "Daily limit")
         self.daily_limit_var = tk.IntVar(value=250)
         self._entry(card, self.daily_limit_var, pady=(0, 2))
@@ -5269,16 +5191,17 @@ class App:
         self.delay_max_var = tk.IntVar(value=12)
         self._entry(col4, self.delay_max_var, pady=(0, 2))
 
-        self._label(card, "Public %  ·  rest = private")
-        pcell = tk.Frame(card, bg=CARD_BG); pcell.pack(fill="x")
-        self.public_pct_var = tk.IntVar(value=int(_s0.get("public_pct", 30)))
-        e = tk.Entry(pcell, textvariable=self.public_pct_var, font=F_BODY,
-                     bg=INPUT_BG, fg=TXT, insertbackground=TXT, relief="flat", width=6,
-                     highlightthickness=1, highlightbackground=BORDER, highlightcolor=FB_BLUE)
-        e.pack(side="left", ipady=4)
-        self.mix_lbl = tk.Label(pcell, text="", bg=CARD_BG, fg=TXT_MUTED, font=F_SMALL)
-        self.mix_lbl.pack(side="left", padx=(10, 0))
-        e.bind("<KeyRelease>", lambda ev: self._refresh_mix_lbl())
+        self._label(card, "Kaun se groups join karne hain")
+        jcell = tk.Frame(card, bg=CARD_BG); jcell.pack(fill="x", pady=(0, 2))
+        self.join_type_var = tk.StringVar(value=_s0.get("join_type", "private"))
+        for _val, _txt in (("private", "Sirf PRIVATE groups"),
+                           ("public",  "Sirf PUBLIC groups")):
+            tk.Radiobutton(jcell, text=_txt, value=_val, variable=self.join_type_var,
+                           bg=CARD_BG, fg=TXT, selectcolor=INPUT_BG,
+                           activebackground=CARD_BG, activeforeground=TXT,
+                           font=F_BODY, cursor="hand2", relief="flat",
+                           highlightthickness=0, bd=0, anchor="w"
+                           ).pack(side="left", padx=(0, 18))
 
         self._note(card, "Runs 24/7 non-stop · stops at the daily limit.")
 
@@ -5686,9 +5609,6 @@ class App:
                 "city":        city,
                 "page_name":   DEFAULT_PAGE_NAME,
                 "page_link":   self.page_link_var.get().strip(),
-                "min_members": self.min_members_public_var.get(),   # legacy key, back-compat
-                "min_members_public":  self.min_members_public_var.get(),
-                "min_members_private": self.min_members_private_var.get(),
                 "daily_limit": self.daily_limit_var.get(),
                 "delay_min":   self.delay_min_var.get(),
                 "delay_max":   self.delay_max_var.get(),
@@ -5697,7 +5617,7 @@ class App:
                 "license_exp": self.lic_info.get("exp", ""),
                 "key_id":      self.lic_info.get("kid", ""),
                 "gemini_keys": resolve_gemini_keys(self._gemini_box_text()),
-                "public_pct":  self._public_pct(),
+                "join_type":   self.join_type_var.get(),
                 "skip_no_post": bool(self.skip_nopost_var.get()),
                 "same_state_only": bool(self.same_state_var.get()),
                 "include_counties": bool(self.include_counties_var.get()),
@@ -5712,7 +5632,7 @@ class App:
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
             s[f"business_mode{SUFFIX}"] = self.business_var.get()
-            s["public_pct"] = self._public_pct()
+            s["join_type"] = self.join_type_var.get()
             s["skip_no_post"] = bool(self.skip_nopost_var.get())
             s["same_state_only"] = bool(self.same_state_var.get())
             s["include_counties"] = bool(self.include_counties_var.get())
