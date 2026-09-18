@@ -239,16 +239,21 @@ _SCRIPT_CHECKS = [
 ]
 
 
-def detect_non_english(text: str) -> str:
+def detect_non_english(text: str, short: bool = False) -> str:
     """Group English nahi hai to reason string, warna khaali string.
     1) Non-Latin script (Arabic/Hebrew/CJK/Cyrillic/Devanagari/Thai/Greek)
        thodi si bhi mile -> foran non-English (in scripts mein English
        kabhi nahi likha jata, false-positive risk zero).
     2) Warna Spanish/Portuguese ke 2+ distinctive alfaz milen to bhi
-       non-English (naam English ho tab bhi)."""
+       non-English (naam English ho tab bhi).
+
+    short=True group ke NAAM ke liye — threshold kam ho jata hai. Poore
+    body text (2500 chars) ke liye 6 hits theek hain, lekin naam sirf
+    chand lafzon ka hota hai: "凤凰城社区" ke 4 characters 6 wale
+    threshold se neeche reh jate the aur group join ho jata tha."""
     t = text or ""
     for label, rx, min_hits in _SCRIPT_CHECKS:
-        if len(rx.findall(t)) >= min_hits:
+        if len(rx.findall(t)) >= (2 if short else min_hits):
             return label
     tl = t.lower()
     hits = sum(1 for m in NON_ENGLISH_MARKERS if m in tl)
@@ -793,6 +798,13 @@ DEFAULT_SEARCH_KEYWORDS = [
     'Unpaused',
     'Past/ present / future',
 ]
+
+# ── Backend filters (UI par option nahi — Muzammil ki tay-shuda policy) ──
+# Group join karne ki kam se kam shart. Ye jaan boojh kar UI se bahar
+# rakhe gaye hain taake employee inhe badal na sake.
+MIN_MEMBERS = 1000          # public aur private, dono ke liye
+REQUIRE_ACTIVITY = True     # join se pehle recent activity check
+ENGLISH_ONLY = True         # sirf English group
 
 # Ek area par lagataar itni wordings se 0 naya group mile -> area khatam
 # samjho aur agle area par jao.
@@ -1937,6 +1949,33 @@ def _parse_count(s: str) -> int:
         val *= 1_000_000
     return int(val)
 
+# Facebook group ke "About" mein activity likhi hoti hai:
+# "12 posts today" / "10+ posts a day" / "3 posts a month" wagera.
+# Ye PRIVATE groups par bhi nazar aati hai (post nahi dikhte, ye dikhta hai)
+# — isliye dono type ke liye yahi pehla check hai.
+_ACT_RX = [
+    (re.compile(r"([\d.,]+)\s*\+?\s*posts?\s+(?:a\s+)?(?:day|today)", re.I), 30),
+    (re.compile(r"([\d.,]+)\s*\+?\s*posts?\s+(?:a\s+|per\s+)?week", re.I), 4),
+    (re.compile(r"([\d.,]+)\s*\+?\s*posts?\s+(?:a\s+|per\s+)?month", re.I), 1),
+]
+MIN_POSTS_PER_MONTH = 4          # ~hafte mein ek post se kam = mara hua group
+
+
+def activity_from_text(text: str):
+    """(mila?, posts-per-month) — About se activity padho.
+    Kuch na mile to (False, 0)."""
+    t = text or ""
+    best = None
+    for rx, mult in _ACT_RX:
+        m = rx.search(t)
+        if m:
+            n = _parse_count(m.group(1))
+            v = n * mult
+            if best is None or v > best:
+                best = v
+    return (True, best) if best is not None else (False, 0)
+
+
 async def check_group_activity(page) -> bool:
     """
     Public group ke recent posts check karo:
@@ -2760,7 +2799,12 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                     log_csv(area, name, url, "wrong_state", members, privacy)
                     return "skipped"
 
-        if non_english:
+        # English-only (backend policy). Body ke sath ab group ka ASLI
+        # naam bhi check hota hai — kai groups ka content thoda English
+        # hota hai lekin naam poora doosri zabaan mein.
+        if ENGLISH_ONLY:
+            non_english = non_english or detect_non_english(name, short=True)
+        if ENGLISH_ONLY and non_english:
             send_ui("log", text=f"🌐 Non-English group ({non_english}), skip: {name}")
             log_csv(area, name, url, "non_english", members, privacy)
             return "skipped"
@@ -2773,20 +2817,35 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 already_joined.add(url)
             return "skipped"
 
+        # Kam se kam MIN_MEMBERS (backend policy, UI par option nahi)
+        if members > 0 and members < MIN_MEMBERS:
+            send_ui("log", text=f"⏭️  Skip ({members} members < {MIN_MEMBERS}): {name}")
+            log_csv(area, name, url, "low_members", members, privacy)
+            return "skipped"
+
         # ────────────── Sirf private / sirf public ──────────────
-        # (min-members ka filter hata diya gaya - har size ka group chalega)
         _qmsg, _qcsv = _wrong_type(config, privacy)
         if _qmsg:
             send_ui("log", text=f"⚖️  {_qmsg}, skip: {name}")
             log_csv(area, name, url, _qcsv, members, privacy)
             return "skipped"
 
-        if privacy == "Public":
-            active = await check_group_activity(page)
-            if not active:
-                send_ui("log", text=f"⏭️  Skip (low activity/admin-only): {name}")
+        # ── Recent activity (backend policy) ─────────────
+        # Pehle About ka activity number dekho — ye PRIVATE groups par bhi
+        # milta hai. Na mile to Public groups ke posts DOM se naapo
+        # (private ke posts join se pehle dikhte hi nahi).
+        if REQUIRE_ACTIVITY:
+            _found, _ppm = activity_from_text(body_txt)
+            if _found and _ppm < MIN_POSTS_PER_MONTH:
+                send_ui("log", text=f"💤 Skip (mahine mein ~{_ppm} post): {name}")
                 log_csv(area, name, url, "low_activity", members, privacy)
                 return "skipped"
+            if not _found and privacy == "Public":
+                active = await check_group_activity(page)
+                if not active:
+                    send_ui("log", text=f"⏭️  Skip (low activity/admin-only): {name}")
+                    log_csv(area, name, url, "low_activity", members, privacy)
+                    return "skipped"
 
         clicked = await click_join(page)
         if not clicked:
@@ -2960,6 +3019,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
     """)
 
     urls = []
+    pre_skipped = 0
     for clean, card_txt in cards.items():
         if clean in already_joined:
             continue
@@ -2973,10 +3033,27 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         _blk = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
         if any(kw and _kw_hit(kw, slug_l) for kw in _blk):
             continue
-        # Card se privacy uthao (member-count ka filter hata diya gaya)
         card_privacy = "Private" if "Private" in (card_txt or "") else "Public" if "Public" in (card_txt or "") else "?"
+        # Card par member count likha hota hai — chhota group yahin chhoro,
+        # page kholne ki zaroorat hi nahi (~20 sec per group bachta hai)
+        m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members', card_txt or "", re.I)
+        card_members = _parse_count(m.group(1)) if m else 0
+        if 0 < card_members < MIN_MEMBERS:
+            log_csv(city, name, clean, "low_members", card_members, card_privacy)
+            skipped += 1
+            pre_skipped += 1
+            send_ui("skipped")
+            _pa = config.get("_activity")
+            if _pa:
+                try:
+                    _pa.record_skip("low_members")
+                except Exception:
+                    pass
+            continue
         urls.append((clean, card_privacy))
 
+    if pre_skipped:
+        send_ui("log", text=f"   ⚡ {pre_skipped} small groups skipped from search results (not opened)")
     send_ui("log", text=f"   📋 {len(urls)} groups found")
 
     for group_url, card_privacy in list(urls):
