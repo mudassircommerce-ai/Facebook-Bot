@@ -34,6 +34,7 @@ from areas import AREAS, CAR_AREAS, DUCT_AREAS, areas_for
 # activity.py       = usage/usage_<employee>.json likhta hai (owner ke
 #                     dashboard ke liye).
 import license_common as lic
+import activity as activity_mod
 from activity import ActivityLog
 
 # Har 2 min pe heartbeat + license re-check
@@ -347,6 +348,11 @@ _ACT = None               # current session ka ActivityLog — module-level
 _GEMINI_DEAD_REASON = None    # (legacy — ab set nahi hota; bot Gemini fail par
                              #  rukta NAHI, template answers pe chalta hai)
 _GK_ALL_DOWN_UNTIL = 0.0     # saari keys down mile to itne der (monotonic) tak
+_GEMINI_DOWN = threading.Event()   # saari keys fail -> bot ruk kar 5 min baad restart
+user_stop_event = threading.Event()  # SIRF UI ka STOP button — gemini/auto stop se alag
+
+GEMINI_RETRY_SEC = 300             # 5 minute
+
                              #  poora retry-pass skip karo, seedha template
 
 
@@ -627,15 +633,21 @@ def _gemini_sync(question, city):
     # Retry ke baad bhi saari keys fail. Bot ko ROKTA NAHI — sirf is sawaal
     # ka jawab built-in template se dega aur chalta rahega. Ek Discord note
     # (spam nahi), phir 10 min tak Gemini try hi nahi karega.
-    if time.monotonic() >= _GK_ALL_DOWN_UNTIL:
-        send_ui("log", text=f"⚠️ All {n} Gemini key(s) rate-limited/down — using "
-                             f"built-in template answers for now (joining continues).")
-        _dmsg = (f"⚠️ Gemini keys temporarily down ({n} keys) — bot switched to "
-                 f"template answers and KEEPS RUNNING. Will retry Gemini in ~10 min.")
-        try:
-            (_ACT.alert(_dmsg) if _ACT else __import__("activity").send_alert("bot", _dmsg))
-        except Exception:
-            pass
+    # Retry ke baad bhi saari keys fail -> bot ROK do. 5 min baad khud
+    # restart hoga aur keys dobara check karega. (Pehle bot template
+    # answers par chalta rehta tha, jis se AI-only sawaalon wale groups
+    # ke jawab kharab jate the.)
+    send_ui("log", text=f"⛔ All {n} Gemini key(s) failed — stopping the bot. "
+                        f"It will restart by itself in {GEMINI_RETRY_SEC // 60} min "
+                        f"and re-check the keys.")
+    _dmsg = (f"⛔ All {n} Gemini keys failed — bot STOPPED. Auto-restart in "
+             f"{GEMINI_RETRY_SEC // 60} min with a fresh key check.")
+    try:
+        (_ACT.alert(_dmsg) if _ACT else __import__("activity").send_alert("bot", _dmsg))
+    except Exception:
+        pass
+    _GEMINI_DOWN.set()
+    stop_event.set()
     _GK_ALL_DOWN_UNTIL = time.monotonic() + 600
     return None
 
@@ -802,7 +814,9 @@ DEFAULT_SEARCH_KEYWORDS = [
 # ── Backend filters (UI par option nahi — Muzammil ki tay-shuda policy) ──
 # Group join karne ki kam se kam shart. Ye jaan boojh kar UI se bahar
 # rakhe gaye hain taake employee inhe badal na sake.
-MIN_MEMBERS = 1000          # public aur private, dono ke liye
+DEFAULT_MIN_MEMBERS = 1000  # UI ka default (employee badal sakta hai)
+BIG_MIN_MEMBERS = 5000      # is se upar warning dikhao
+LICENSE_WARN_DAYS = 2       # itne din bachne par renewal reminder
 REQUIRE_ACTIVITY = True     # join se pehle recent activity check
 ENGLISH_ONLY = True         # sirf English group
 
@@ -2641,19 +2655,42 @@ async def apply_fb_filters(page, city):
 
 # ── Main Join Logic ───────────────────────────────────────────
 
-def _wrong_type(config, privacy: str):
-    """Employee ne "sirf private" ya "sirf public" chuna hai — us se alag
-    type ka group skip. (message, csv_status) wapas, warna (None, None).
+def _min_members_for(config, privacy: str) -> int:
+    """Per-privacy minimum members. Old configs only had 'min_members' —
+    that stays the fallback for both. Unknown privacy -> take the SMALLER
+    of the two so nothing is skipped by mistake."""
+    _legacy = config.get("min_members", DEFAULT_MIN_MEMBERS)
+    pub = int(config.get("min_members_public", _legacy) or 0)
+    pri = int(config.get("min_members_private", _legacy) or 0)
+    if privacy == "Public":
+        return pub
+    if privacy == "Private":
+        return pri
+    return min(pub, pri)
 
-    Pehle yahan public/private ka PERCENTAGE quota tha (public_pct). Ab
-    sirf ek chunao hai, isliye hisaab-kitab ki zaroorat nahi. Privacy
-    pata na chale ('Unknown') to skip MAT karo — join kar lo.
+
+def _quota_block(config, privacy: str):
+    """Public/Private ratio quota — should this group be skipped for now?
+    Returns (message, csv_status), else (None, None).
+
+    The employee sets what % of joins should be public (rest private).
+    Whichever type runs ahead of target is skipped until the other one
+    catches up, so the mix stays near the target across the session.
     """
-    want = (config.get("join_type") or "private").lower()
-    if privacy == "Public" and want != "public":
-        return "Sirf private set hai", "ratio_public"
-    if privacy == "Private" and want != "private":
-        return "Sirf public set hai", "ratio_private"
+    pub_pct = config.get("public_pct", 30)
+    jp = config.get("_jp", 0)
+    jv = config.get("_jpriv", 0)
+    tot = jp + jv
+    if privacy == "Public":
+        if pub_pct <= 0:
+            return "100% private set — skipping public", "ratio_public"
+        if tot >= 4 and (jp + 1) / (tot + 1) > pub_pct / 100.0 + 0.05:
+            return f"Public quota reached ({jp}/{tot})", "ratio_public"
+    elif privacy == "Private":
+        if pub_pct >= 100:
+            return "100% public set — skipping private", "ratio_private"
+        if tot >= 4 and (jv + 1) / (tot + 1) > (100 - pub_pct) / 100.0 + 0.05:
+            return f"Private quota reached ({jv}/{tot})", "ratio_private"
     return None, None
 
 
@@ -2676,6 +2713,51 @@ async def _goto_retry(page, url, timeout: int = 20000, tries: int = 2):
             if i + 1 < tries:
                 await sleep(rand_delay(1.5, 3))
     raise last
+
+
+async def alert_ss(page, config, reason: str, detail: str = "") -> None:
+    """Bot ruk-ne / limit / restriction par: SCREENSHOT lo aur wajah ke
+    sath Discord par bhejo.
+
+    Employee ko sirf "bot ruk gaya" dikhta tha aur admin ko pata hi nahi
+    chalta tha ke kyun. Ab har aise waqt ki tasveer + wajah server par
+    pohonch jati hai. Screenshot na ban sake to alert phir bhi jata hai
+    (sirf text)."""
+    shot = ""
+    try:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", reason)[:40] or "event"
+        shot = os.path.join(SS_DIR, "alert_" + safe + "_" + stamp + ".png")
+        os.makedirs(SS_DIR, exist_ok=True)
+        await page.screenshot(path=shot, full_page=False)
+    except Exception:
+        shot = ""
+
+    who = config.get("employee", "") or "unknown"
+    url = ""
+    try:
+        url = page.url or ""
+    except Exception:
+        pass
+    txt = ("**" + reason + "**" + "\n" + (detail or "") + "\n" +
+           "profile: " + str(SUFFIX or "1") + "  |  today: " +
+           str(config.get("_today_total", "?")) + "/" +
+           str(config.get("daily_limit", "?")) + "\n" + "page: " + url[:200])
+
+    act = config.get("_activity")
+    try:
+        if shot and os.path.exists(shot):
+            if act:
+                act.alert_file(txt, shot)
+            else:
+                activity_mod.send_alert_file(who, txt, shot, sync=True)
+        else:
+            if act:
+                act.alert(txt)
+            else:
+                activity_mod.send_alert(who, txt, sync=True)
+    except Exception:
+        pass
 
 
 async def join_one_group(page, url, name, area, config, already_joined=None):
@@ -2704,17 +2786,8 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             blk = await confirm_account_block(page, blk)
         if blk:
             send_ui("log", text=f"🚫 ACCOUNT BLOCK confirmed: '{blk}' — stopping the bot")
-            _a = config.get("_activity")
-            if _a:
-                try:
-                    _a.alert(f"ACCOUNT CHECKPOINT / BLOCK ({blk}) — bot stopped. "
-                             f"Give this account a few days of rest.")
-                except Exception:
-                    pass
-            try:
-                await ss(page, "account_block")
-            except Exception:
-                pass
+            await alert_ss(page, config, f"ACCOUNT CHECKPOINT / BLOCK ({blk})",
+                           "Bot stopped. Give this account a few days of rest.")
             config["_end_reason"] = "account_blocked"
             stop_event.set()
             return "blocked"
@@ -2794,8 +2867,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 _mine = _state_matches(_hdr, _tgt_st, STATE_NAMES.get(_tgt_st, ""))
                 _other = "" if _mine else _other_state_in(_hdr, _tgt_st)
                 if _other:
-                    send_ui("log", text=f"🗺️  Doosra state ({_other}), "
-                                        f"{_tgt_st} chahiye — skip: {name}")
+                    send_ui("log", text=f"🗺️  Wrong state ({_other}), need {_tgt_st} — skip: {name}")
                     log_csv(area, name, url, "wrong_state", members, privacy)
                     return "skipped"
 
@@ -2817,14 +2889,14 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 already_joined.add(url)
             return "skipped"
 
-        # Kam se kam MIN_MEMBERS (backend policy, UI par option nahi)
-        if members > 0 and members < MIN_MEMBERS:
-            send_ui("log", text=f"⏭️  Skip ({members} members < {MIN_MEMBERS}): {name}")
+        _min_req = _min_members_for(config, privacy)
+        if members > 0 and members < _min_req:
+            send_ui("log", text=f"⏭️  Skip ({members} {privacy.lower()} members < {_min_req}): {name}")
             log_csv(area, name, url, "low_members", members, privacy)
             return "skipped"
 
         # ────────────── Sirf private / sirf public ──────────────
-        _qmsg, _qcsv = _wrong_type(config, privacy)
+        _qmsg, _qcsv = _quota_block(config, privacy)
         if _qmsg:
             send_ui("log", text=f"⚖️  {_qmsg}, skip: {name}")
             log_csv(area, name, url, _qcsv, members, privacy)
@@ -2837,7 +2909,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         if REQUIRE_ACTIVITY:
             _found, _ppm = activity_from_text(body_txt)
             if _found and _ppm < MIN_POSTS_PER_MONTH:
-                send_ui("log", text=f"💤 Skip (mahine mein ~{_ppm} post): {name}")
+                send_ui("log", text=f"💤 Skip (only ~{_ppm} posts/month): {name}")
                 log_csv(area, name, url, "low_activity", members, privacy)
                 return "skipped"
             if not _found and privacy == "Public":
@@ -2862,17 +2934,9 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             after_txt = ""
         if check_pending_limit(after_txt):
             send_ui("log", text="⏸️  Join-request limit reached (too many pending groups) — stopping the bot")
-            _a = config.get("_activity")
-            if _a:
-                try:
-                    _a.alert("JOIN-REQUEST LIMIT reached — too many pending requests. "
-                             "Bot stopped. Let some requests get approved/cancelled, then start again.")
-                except Exception:
-                    pass
-            try:
-                await ss(page, "pending_limit")
-            except Exception:
-                pass
+            await alert_ss(page, config, "JOIN-REQUEST LIMIT reached",
+                           "Too many pending requests. Bot stopped. Let some "
+                           "requests get approved/cancelled, then start again.")
             config["_end_reason"] = "pending_limit"
             stop_event.set()
             return "blocked"
@@ -2882,12 +2946,8 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             blk2 = await confirm_account_block(page, blk2)
         if blk2:
             send_ui("log", text=f"🚫 ACCOUNT BLOCK after join confirmed: '{blk2}' — stopping the bot")
-            _a = config.get("_activity")
-            if _a:
-                try:
-                    _a.alert(f"ACCOUNT BLOCK ({blk2}) after a join — bot stopped.")
-                except Exception:
-                    pass
+            await alert_ss(page, config, f"ACCOUNT BLOCK ({blk2}) after a join",
+                           "Bot stopped right after a join attempt.")
             config["_end_reason"] = "account_blocked"
             stop_event.set()
             return "blocked"
@@ -2895,7 +2955,14 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         await select_page(page, config.get("page_name", ""))
         await handle_questions(page)
 
-        send_ui("log", text=f"✅ Joined: {name} ({members} members | {privacy})")
+        if privacy == "Public":
+            config["_jp"] = config.get("_jp", 0) + 1
+        elif privacy == "Private":
+            config["_jpriv"] = config.get("_jpriv", 0) + 1
+        _jp, _jv = config.get("_jp", 0), config.get("_jpriv", 0)
+        _tt = _jp + _jv
+        _mix = f" | mix {round(100*_jp/_tt)}% pub / {round(100*_jv/_tt)}% priv" if _tt else ""
+        send_ui("log", text=f"✅ Joined: {name} ({members} members | {privacy}){_mix}")
         log_csv(area, name, url, "joined", members, privacy)
         save_joined(url)
         return "joined"
@@ -2957,7 +3024,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
     except Exception as e:
         # Pehle yahan chup-chaap return ho jata tha — poora target bina
         # kisi log ke gayab. Ab kam se kam pata to chale.
-        send_ui("log", text=f"   ⚠️  Search page load nahi hui ('{query}') — skip")
+        send_ui("log", text=f"   ⚠️  Search page didn't load ('{query}') — skip")
         log_error(f"search goto failed: {query}", e)
         return joined, skipped
 
@@ -3038,7 +3105,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         # page kholne ki zaroorat hi nahi (~20 sec per group bachta hai)
         m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members', card_txt or "", re.I)
         card_members = _parse_count(m.group(1)) if m else 0
-        if 0 < card_members < MIN_MEMBERS:
+        if 0 < card_members < _min_members_for(config, card_privacy):
             log_csv(city, name, clean, "low_members", card_members, card_privacy)
             skipped += 1
             pre_skipped += 1
@@ -3068,7 +3135,7 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         # page load hota tha (~20 sec zaya); ek run mein sainkdon aise skip
         # hote hain, isi liye bot "bohot baad mein" join karta lagta tha.
         if card_privacy in ("Public", "Private"):
-            _qmsg, _qcsv = _wrong_type(config, card_privacy)
+            _qmsg, _qcsv = _quota_block(config, card_privacy)
             if _qmsg:
                 send_ui("log", text=f"   ⚖️  {_qmsg}, skip (not opened): {name}")
                 log_csv(city, name, group_url, _qcsv, 0, card_privacy)
@@ -3414,11 +3481,9 @@ async def playwright_main(config):
                     blk = ""
                 if blk:
                     send_ui("log", text=f"🚫 ACCOUNT BLOCK (watchdog, confirmed): '{blk}' — stopping")
-                    if act:
-                        try:
-                            act.alert(f"ACCOUNT CHECKPOINT / BLOCK ({blk}) — bot stopped.")
-                        except Exception:
-                            pass
+                    await alert_ss(page, config,
+                                   f"ACCOUNT CHECKPOINT / BLOCK ({blk})",
+                                   "Caught by the 2-minute watchdog. Bot stopped.")
                     config["_end_reason"] = "account_blocked"
                     stop_event.set()
                     return
@@ -3427,6 +3492,8 @@ async def playwright_main(config):
                     send_ui("log", text=f"⛔ License: {chk['error']}")
                     send_ui("log", text="   Bot is stopping — activate a new key and press START again.")
                     _alert_wrong_pc(chk)
+                    await alert_ss(page, config, "LICENSE problem",
+                                   str(chk.get("error", "")))
                     config["_end_reason"] = "license_expired"
                     stop_event.set()
                     return
@@ -3482,7 +3549,7 @@ async def playwright_main(config):
             _round += 1
             _round_start = joined_today
             if _round > 1:
-                send_ui("log", text=f"\n🔁 Round {_round} — saare areas dobara (naye bane groups ke liye)…")
+                send_ui("log", text=f"\n🔁 Round {_round} — re-scanning all areas for newly created groups…")
                 random.shuffle(areas_to_run)
 
             for area_idx, area in enumerate(areas_to_run, 1):
@@ -3577,16 +3644,42 @@ async def playwright_main(config):
                 pass
         except Exception:
             pass
+        if _GEMINI_DOWN.is_set():
+            config["_end_reason"] = "gemini_down"
         if config.get("_end_reason") not in ("license_expired", "account_blocked",
                                               "pending_limit", "setup_failed",
                                               "file_tamper", "service_paused",
                                               "login_timeout", "no_page_link",
-                                              "nothing_left"):
+                                              "nothing_left", "gemini_down"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
 
         _this_run = joined_today - _session_start
         config["_run_joined"]  = _this_run
         config["_today_total"] = joined_today
+
+        # Har GHAIR-MAMOOLI stop par screenshot + wajah Discord bhejo.
+        # (Normal finish / employee ka apna STOP par nahi - warna har roz
+        # ka aam stop bhi alert ban jata.)
+        _r = config.get("_end_reason", "")
+        if _r not in ("completed", "user_stop", "nothing_left"):
+            _why = {
+                "gemini_down":     "All Gemini API keys failed",
+                "license_expired": "License expired / invalid",
+                "account_blocked": "Facebook checkpoint or account block",
+                "pending_limit":   "Join-request limit (too many pending)",
+                "service_paused":  "Paused by the administrator",
+                "setup_failed":    "Pre-flight setup failed",
+                "file_tamper":     "Bot files were modified",
+                "login_timeout":   "Facebook login timed out",
+                "no_page_link":    "Page link missing or wrong",
+                "error":           "Bot crashed",
+            }.get(_r, _r)
+            try:
+                await alert_ss(page, config, "BOT STOPPED - " + _why,
+                               "This run: joined " + str(_this_run) +
+                               ", skipped " + str(skipped_today) + ".")
+            except Exception:
+                pass
         send_ui("log", text=f"\n🎉 This run: joined {_this_run} groups, skipped {skipped_today}. "
                             f"Today's total: {joined_today}/{config.get('daily_limit', 250)}.")
         await ctx.close()
@@ -3643,23 +3736,23 @@ def _launch_error_hint(e: Exception) -> str:
     s = (str(e) + " " + type(e).__name__).lower()
     if "executable doesn't exist" in s or "playwright install" in s \
             or "browsertype.launch" in s and "download" in s:
-        return ("Chromium browser is folder mein install nahi hua.\n"
-                "HAL: is folder mein Command Prompt kholo aur chalao:\n"
+        return ("Chromium browser is not installed in this folder.\n"
+                "FIX: open Command Prompt in this folder and run:\n"
                 "       py -m playwright install chromium\n"
-                "   (ya bot band karke START.bat dobara double-click karo)")
+                "   (or close the bot and double-click START.bat again)")
     if "processsingleton" in s or "singletonlock" in s \
             or "profile appears to be in use" in s or "already in use" in s:
-        return ("Ye profile pehle se kisi aur window mein khuli hai.\n"
-                "HAL: is profile ki saari bot + Chrome windows band karo, "
-                "phir dobara koshish karo.")
+        return ("This profile is already open in another window.\n"
+                "FIX: close every bot + Chrome window for this profile, "
+                "then try again.")
     if "permission" in s or "access is denied" in s:
-        return ("Folder par likhne ki ijazat nahi (permission denied).\n"
-                "HAL: folder ko Desktop/Documents mein rakho (Program Files "
-                "ya OneDrive mein nahi), ya START.bat ko right-click -> "
+        return ("No write permission for this folder (permission denied).\n"
+                "FIX: move the folder to Desktop/Documents (not Program Files "
+                "or OneDrive), or right-click START.bat -> "
                 "'Run as administrator'.")
     if "no such file or directory" in s or "cannot find the path" in s:
-        return ("Folder ki koi file missing hai.\n"
-                "HAL: poora folder dobara copy karo — adhoora copy na ho.")
+        return ("A file is missing from this folder.\n"
+                "FIX: copy the whole folder again — the copy was incomplete.")
     return ""
 
 
@@ -4358,9 +4451,19 @@ def run_playwright(config):
     send_ui("log", text=(f"🤖 AI answers ON ({GEMINI_MODEL}) — {len(GEMINI_KEYS)} key(s) in rotation")
             if GEMINI_KEYS else "💬 AI answers OFF — using built-in template answers")
 
-    _jt = (config.get("join_type") or "private").lower()
-    send_ui("log", text=f"🎯 Sirf {_jt.upper()} groups join honge"
+    config["_jp"] = 0
+    config["_jpriv"] = 0
+    _pp = config.get("public_pct", 30)
+    send_ui("log", text=f"🎯 Target mix: {_pp}% public / {100 - _pp}% private"
             + ("  ·  skip no-post groups" if config.get("skip_no_post", True) else ""))
+    _hi = max(int(config.get("min_members_public", DEFAULT_MIN_MEMBERS) or 0),
+              int(config.get("min_members_private", DEFAULT_MIN_MEMBERS) or 0))
+    send_ui("log", text=f"👥 Min members: {config.get('min_members_public')} public / "
+                        f"{config.get('min_members_private')} private")
+    if _hi >= BIG_MIN_MEMBERS:
+        send_ui("log", text=f"⚠️  Minimum {_hi:,} members is HIGH — such big groups are "
+                            f"rare, so joining will be MUCH slower and the daily total "
+                            f"will be lower. Lower it to ~{DEFAULT_MIN_MEMBERS:,} for speed.")
     if config.get("custom_blocked"):
         send_ui("log", text="   ⛔ Extra blocked keywords: "
                 + ", ".join(config["custom_blocked"][:12]))
@@ -4403,11 +4506,41 @@ def run_playwright(config):
                  "nothing_left")
     restarts = 0
     _stall_restarts = 0
+    _gem_restarts = 0
+    GEMINI_MAX_RESTARTS = 24        # ~2 ghante tak har 5 min koshish
     _last_err = ""
     try:
         while True:
             try:
                 asyncio.run(playwright_main(config))
+                if config.get("_end_reason") == "gemini_down" and not user_stop_event.is_set():
+                    _gem_restarts += 1
+                    if _gem_restarts > GEMINI_MAX_RESTARTS:
+                        config["_end_reason"] = "gemini_keys_failed"
+                        break
+                    send_ui("log", text=f"⏸️  Gemini keys down — waiting "
+                                        f"{GEMINI_RETRY_SEC // 60} min, then restarting "
+                                        f"({_gem_restarts}/{GEMINI_MAX_RESTARTS}). "
+                                        f"DON'T press START — it continues by itself.")
+                    _end_at = time.time() + GEMINI_RETRY_SEC
+                    while time.time() < _end_at and not user_stop_event.is_set():
+                        time.sleep(3)
+                    if user_stop_event.is_set():
+                        config["_end_reason"] = "user_stop"
+                        break
+                    # keys dobara check: cooldown saaf karo aur file/UI se
+                    # taza keys uthao (admin ne nayi daal di hon to lag jayen)
+                    _GEMINI_DOWN.clear()
+                    _gk_cooldown.clear()
+                    globals()["_GK_ALL_DOWN_UNTIL"] = 0.0
+                    _fresh = resolve_gemini_keys("")   # file/env se taza keys
+                    if _fresh:
+                        globals()["GEMINI_KEYS"] = _fresh
+                    send_ui("log", text=f"🔄 Restarting — re-checking "
+                                        f"{len(GEMINI_KEYS)} Gemini key(s)…")
+                    stop_event.clear()
+                    config["_end_reason"] = "completed"
+                    continue
                 break                                       # normal / terminal finish
             except SystemExit:
                 raise
@@ -4620,6 +4753,8 @@ class App:
         self._style()
         self._build()
         self._refresh_gemini_status()
+        self._refresh_mix_lbl()
+        self._refresh_big_min_warning()
         self._refresh_license_ui()             # fast, local-only check
         self._license_gate()                   # <-- ask for a key BEFORE anything else
         if self._alive():
@@ -4646,6 +4781,45 @@ class App:
             return raw  # plain key string
 
     # ── Targeting UI ────────────────────────────────────────
+    def _public_pct(self):
+        try:
+            return max(0, min(100, int(self.public_pct_var.get())))
+        except Exception:
+            return 30
+
+    def _refresh_mix_lbl(self):
+        p = self._public_pct()
+        self.mix_lbl.config(text=f"→ {p}% public / {100 - p}% private")
+
+    def _min_pub(self):
+        try:
+            return max(0, int(self.min_members_public_var.get()))
+        except Exception:
+            return DEFAULT_MIN_MEMBERS
+
+    def _min_priv(self):
+        try:
+            return max(0, int(self.min_members_private_var.get()))
+        except Exception:
+            return DEFAULT_MIN_MEMBERS
+
+    def _refresh_big_min_warning(self):
+        """Warn when a very high minimum is set - otherwise the employee
+        thinks the bot is slow/broken, when really such big groups are
+        rare and take much longer to find."""
+        try:
+            hi = max(self._min_pub(), self._min_priv())
+        except Exception:
+            return
+        if hi >= BIG_MIN_MEMBERS:
+            self.big_min_lbl.config(
+                text=(f"⚠  Minimum is set to {hi:,} members. Groups that big "
+                      f"are rare - the bot will take MUCH longer to find each "
+                      f"join and the daily total will be lower. For speed, keep "
+                      f"it around {DEFAULT_MIN_MEMBERS:,}."))
+        else:
+            self.big_min_lbl.config(text="")
+
     def _search_keywords(self):
         """UI box se employee ke apne search keywords (raw lines)."""
         try:
@@ -4785,10 +4959,14 @@ class App:
             info = lic.validate_key(lic.load_active_key(), check_url=False)
         self.lic_info = info
         if info["ok"]:
+            _dl = int(info.get("days_left", 99) or 0)
             self.lic_var.set(
                 f"Licensed to:  {info['employee']}      "
-                f"Expires:  {info['exp']}   ({info.get('time_left','')} left)")
-            self.lic_lbl.config(fg=GREEN)
+                f"Expires:  {info['exp']}   ({info.get('time_left','')} left)"
+                + (f"      \u26a0  RENEW SOON \u2014 contact the admin for a new key"
+                   if _dl <= LICENSE_WARN_DAYS else ""))
+            self.lic_lbl.config(fg=ORANGE if _dl <= LICENSE_WARN_DAYS else GREEN)
+            self._license_expiry_reminder(info)
             self.lic_row.pack_forget()
             if not self.running:
                 self.btn.config(state="normal")
@@ -4798,6 +4976,35 @@ class App:
             self.lic_row.pack(fill="x", padx=16, pady=(0, 8))
             self.btn.config(state="disabled")
             _alert_wrong_pc(info)
+
+    def _license_expiry_reminder(self, info) -> None:
+        """Show a one-time popup when the license is about to expire, so the
+        employee asks the admin for a new key BEFORE the bot stops dead.
+        (Two employees lost a full working day this way.)"""
+        if getattr(self, "_exp_warned", False):
+            return
+        try:
+            days = int(info.get("days_left", 99) or 0)
+        except Exception:
+            return
+        if days > LICENSE_WARN_DAYS:
+            return
+        self._exp_warned = True
+        when = ("TODAY" if days <= 0 else
+                "in 1 day" if days == 1 else f"in {days} days")
+        try:
+            messagebox.showwarning(
+                "License expiring soon",
+                f"Your license expires {when}." + "\n"
+                f"({info.get('employee','')} \u2014 valid until {info.get('exp','')})" + "\n\n"
+                "Please CONTACT THE ADMIN now and get a new key." + "\n"
+                "When it runs out the bot stops and you cannot "
+                "start it again until a new key is entered." + "\n\n"
+                "You can keep working until then.")
+        except Exception:
+            pass
+        send_ui("log", text=f"\u26a0\ufe0f  License expires {when} \u2014 contact the "
+                            f"admin for a new key before it runs out.")
 
     def _try_activate(self, key, parent=None):
         """Validate + save a key. Returns (ok, message)."""
@@ -5254,6 +5461,23 @@ class App:
 
         # ── LIMITS & SPEED ──────────────────────────────────
         self._grouphdr(card, "⏱  LIMITS & SPEED")
+        row1 = tk.Frame(card, bg=CARD_BG); row1.pack(fill="x")
+        col1 = tk.Frame(row1, bg=CARD_BG); col1.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        col2 = tk.Frame(row1, bg=CARD_BG); col2.pack(side="left", expand=True, fill="x")
+        self._label(col1, "Min Public members")
+        self.min_members_public_var = tk.IntVar(
+            value=int(_s0.get("min_members_public", DEFAULT_MIN_MEMBERS)))
+        self._entry(col1, self.min_members_public_var, pady=(0, 2))
+        self._label(col2, "Min Private members")
+        self.min_members_private_var = tk.IntVar(
+            value=int(_s0.get("min_members_private", DEFAULT_MIN_MEMBERS)))
+        self._entry(col2, self.min_members_private_var, pady=(0, 2))
+        self.big_min_lbl = tk.Label(card, text="", bg=CARD_BG, fg=ORANGE,
+                                    font=F_SMALL, justify="left", wraplength=340)
+        self.big_min_lbl.pack(fill="x", anchor="w")
+        for _v in (self.min_members_public_var, self.min_members_private_var):
+            _v.trace_add("write", lambda *a: self._refresh_big_min_warning())
+
         self._label(card, "Daily limit")
         self.daily_limit_var = tk.IntVar(value=250)
         self._entry(card, self.daily_limit_var, pady=(0, 2))
@@ -5268,17 +5492,16 @@ class App:
         self.delay_max_var = tk.IntVar(value=12)
         self._entry(col4, self.delay_max_var, pady=(0, 2))
 
-        self._label(card, "Kaun se groups join karne hain")
-        jcell = tk.Frame(card, bg=CARD_BG); jcell.pack(fill="x", pady=(0, 2))
-        self.join_type_var = tk.StringVar(value=_s0.get("join_type", "private"))
-        for _val, _txt in (("private", "Sirf PRIVATE groups"),
-                           ("public",  "Sirf PUBLIC groups")):
-            tk.Radiobutton(jcell, text=_txt, value=_val, variable=self.join_type_var,
-                           bg=CARD_BG, fg=TXT, selectcolor=INPUT_BG,
-                           activebackground=CARD_BG, activeforeground=TXT,
-                           font=F_BODY, cursor="hand2", relief="flat",
-                           highlightthickness=0, bd=0, anchor="w"
-                           ).pack(side="left", padx=(0, 18))
+        self._label(card, "Public %  ·  rest = private")
+        pcell = tk.Frame(card, bg=CARD_BG); pcell.pack(fill="x")
+        self.public_pct_var = tk.IntVar(value=int(_s0.get("public_pct", 30)))
+        e = tk.Entry(pcell, textvariable=self.public_pct_var, font=F_BODY,
+                     bg=INPUT_BG, fg=TXT, insertbackground=TXT, relief="flat", width=6,
+                     highlightthickness=1, highlightbackground=BORDER, highlightcolor=FB_BLUE)
+        e.pack(side="left", ipady=4)
+        self.mix_lbl = tk.Label(pcell, text="", bg=CARD_BG, fg=TXT_MUTED, font=F_SMALL)
+        self.mix_lbl.pack(side="left", padx=(10, 0))
+        e.bind("<KeyRelease>", lambda ev: self._refresh_mix_lbl())
 
         self._note(card, "Runs 24/7 non-stop · stops at the daily limit.")
 
@@ -5308,9 +5531,9 @@ class App:
                 _s0.get("search_keywords") or default_search_keyword_lines()))
         except Exception:
             pass
-        self._note(card, "Khali chhoro = built-in wordings (community, moms, "
-                         "residents…). Apne keywords likho to WOH pehle chalte hain, "
-                         "built-in unke baad. Area khud lag jata hai: "
+        self._note(card, "Leave empty = built-in wordings (community, moms, "
+                         "residents…). Your own keywords run FIRST, built-in ones "
+                         "after. The area is added automatically: "
                          "\"car detailing\" → \"Phoenix AZ car detailing\".")
 
         self._label(card, "Don't-join keywords  ·  one per line")
@@ -5479,9 +5702,9 @@ class App:
             messagebox.showinfo(
                 "Auto-post on Page",
                 "🔒  Only for developer\n\n"
-                "Auto-posting admin-only feature hai — yeh sirf admin "
-                "license se chalta hai.\n\nAgar aapko iski zaroorat hai to "
-                "admin se baat karein.")
+                "Auto-posting is an admin-only feature — it runs only "
+                "with an admin license.\n\nIf you need it, please "
+                "contact the admin.")
             return
         self._open_autopost()
 
@@ -5629,6 +5852,7 @@ class App:
 
     def _toggle(self):
         if self.running:
+            user_stop_event.set()
             stop_event.set()
             self.btn.config(text="▶   START", bg=BRAND_BLUE)
             self.status_var.set("●  Stopping...")
@@ -5667,6 +5891,8 @@ class App:
                 self.city_var.set("⚠ Enter an area!")
                 return
             stop_event.clear()
+            user_stop_event.clear()
+            _GEMINI_DOWN.clear()
             self.joined_today  = 0
             self.skipped_today = 0
             self._run_start = time.time()
@@ -5694,7 +5920,10 @@ class App:
                 "license_exp": self.lic_info.get("exp", ""),
                 "key_id":      self.lic_info.get("kid", ""),
                 "gemini_keys": resolve_gemini_keys(self._gemini_box_text()),
-                "join_type":   self.join_type_var.get(),
+                "public_pct":  self._public_pct(),
+                "min_members": self._min_pub(),   # legacy key, back-compat
+                "min_members_public":  self._min_pub(),
+                "min_members_private": self._min_priv(),
                 "skip_no_post": bool(self.skip_nopost_var.get()),
                 "same_state_only": bool(self.same_state_var.get()),
                 "include_counties": bool(self.include_counties_var.get()),
@@ -5709,7 +5938,9 @@ class App:
             s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
             s[f"city{SUFFIX}"] = self.city_var.get().strip()
             s[f"business_mode{SUFFIX}"] = self.business_var.get()
-            s["join_type"] = self.join_type_var.get()
+            s["public_pct"] = self._public_pct()
+            s["min_members_public"] = self._min_pub()
+            s["min_members_private"] = self._min_priv()
             s["skip_no_post"] = bool(self.skip_nopost_var.get())
             s["same_state_only"] = bool(self.same_state_var.get())
             s["include_counties"] = bool(self.include_counties_var.get())

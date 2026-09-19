@@ -21,6 +21,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 import urllib.parse
 import urllib.request
 from datetime import date, datetime
@@ -97,6 +98,74 @@ def _send_chat_text(text: str, sync: bool = False) -> None:
         work()
     else:
         threading.Thread(target=work, daemon=True).start()
+
+
+def _send_chat_file(text: str, file_path: str, sync: bool = False) -> None:
+    """Discord par TEXT + SCREENSHOT dono bhejo (multipart upload).
+
+    Discord webhook JSON ke sath file nahi leta - multipart/form-data
+    chahiye. File na mile ya kuch bhi ghalat ho to sirf text chala jata
+    hai (alert kabhi zaya nahi hota).
+    """
+    url = _report_url()
+    if not url:
+        return
+    low = url.lower()
+    if not ("discord.com/api/webhooks" in low or "discordapp.com/api/webhooks" in low):
+        _send_chat_text(text, sync=sync)      # Telegram waghera -> sirf text
+        return
+    try:
+        with open(file_path, "rb") as f:
+            blob = f.read()
+        if not blob:
+            raise ValueError("empty screenshot")
+    except Exception:
+        _send_chat_text(text, sync=sync)
+        return
+
+    CRLF = bytes((13, 10))
+    name = os.path.basename(file_path) or "screenshot.png"
+    boundary = "----fbj" + uuid.uuid4().hex
+    b = boundary.encode()
+    parts = [
+        b"--" + b + CRLF,
+        b'Content-Disposition: form-data; name="payload_json"' + CRLF,
+        b"Content-Type: application/json" + CRLF + CRLF,
+        json.dumps({"content": text[:1900]}).encode("utf-8") + CRLF,
+        b"--" + b + CRLF,
+        ('Content-Disposition: form-data; name="files[0]"; filename="%s"' % name
+         ).encode("utf-8") + CRLF,
+        b"Content-Type: image/png" + CRLF + CRLF,
+        blob + CRLF,
+        b"--" + b + b"--" + CRLF,
+    ]
+    body = b"".join(parts)
+
+    def work():
+        try:
+            req = urllib.request.Request(url, data=body, headers={
+                "User-Agent": _UA,
+                "Content-Type": "multipart/form-data; boundary=" + boundary,
+            })
+            urllib.request.urlopen(req, timeout=20).read()
+        except Exception:
+            # upload fail -> kam se kam text to pohonche
+            try:
+                _send_chat_text(text, sync=True)
+            except Exception:
+                pass
+
+    if sync:
+        work()
+    else:
+        threading.Thread(target=work, daemon=True).start()
+
+
+def send_alert_file(employee: str, text: str, file_path: str,
+                    sync: bool = False) -> None:
+    """Module-level alert + screenshot."""
+    _send_chat_file("\U0001f6a8  **" + (employee or "unknown") + "**\n" + text,
+                    file_path, sync=sync)
 
 
 def send_alert(employee: str, text: str, sync: bool = False) -> None:
@@ -303,6 +372,19 @@ class ActivityLog:
         checkpoint / pending-limit / crash jaise cases ke liye."""
         self._last_chat = 0.0
         self._push_text("🚨  " + text + "\n" + self._status_line())
+
+    def alert_file(self, text: str, file_path: str) -> None:
+        """Alert + screenshot Discord par. File na mile ya upload
+        fail ho to sirf text chala jata hai - alert kabhi zaya nahi hota."""
+        self._last_chat = 0.0
+        msg = "\U0001f6a8  " + text + "\n" + self._status_line()
+        try:
+            _send_chat_file(msg, file_path)
+        except Exception:
+            try:
+                self._push_text(msg)
+            except Exception:
+                pass
 
     def daily_summary_text(self) -> str:
         today = date.today().isoformat()
