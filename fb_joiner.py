@@ -109,7 +109,11 @@ def _kw_hit(kw: str, text: str) -> bool:
         return False
     pat = _KW_HIT_CACHE.get(k)
     if pat is None:
-        pat = re.compile(r"\b" + re.escape(k) + r"\b")
+        # Aakhri lafz ka plural bhi pakdo: "sale" -> "sales",
+        # "garage sale" -> "garage sales", "group" -> "groups".
+        # Pehle sirf \bsale\b tha, is liye "Garage Sales" wale groups
+        # (jo sab se aam hain) block list se bach kar JOIN ho jate the.
+        pat = re.compile(r"\b" + re.escape(k) + r"(?:e?s)?\b")
         _KW_HIT_CACHE[k] = pat
     return pat.search(text or "") is not None
 
@@ -1314,6 +1318,17 @@ async def tick_checkboxes(page):
 
         if len(items) == 1:
             i, lbl = items[0]
+            # "I agree to the group rules" jaisa saaf affirmative box AI se
+            # mat poocho - Gemini kabhi kabhi "No" keh deta tha aur box
+            # unticked reh jata tha, jis se poora join hi fail ho jata tha.
+            if _is_aff(lbl) and not _is_neg(lbl):
+                if await _click_cb(page, i):
+                    ticked += 1
+                    send_ui("log", text=f"   ☑️ Ticked: {(lbl or 'agree')[:40]}")
+                else:
+                    send_ui("log", text=f"   ⚠️ Could not tick: {(lbl or 'box')[:40]}")
+                await sleep(rand_delay(0.4, 0.8))
+                continue
             gi = await gemini_pick_index(
                 qtext or lbl or "Should you tick this box to join the group?",
                 ["Yes — tick it (I agree / I do / I promise)",
@@ -2681,6 +2696,18 @@ def _quota_block(config, privacy: str):
     jp = config.get("_jp", 0)
     jv = config.get("_jpriv", 0)
     tot = jp + jv
+
+    # 0% ya 100% = employee ne EK type maanga hai. Aise mein jis group ki
+    # privacy padhi hi na ja sake usse bhi chhor do — warna "0% public"
+    # set hone ke bawajood Unknown-privacy ke group join hote rehte the
+    # (employee ko lagta tha bot "sab bhool kar" join kar raha hai).
+    if privacy not in ("Public", "Private"):
+        if pub_pct <= 0:
+            return "100% private set - privacy unknown, skipping", "ratio_public"
+        if pub_pct >= 100:
+            return "100% public set - privacy unknown, skipping", "ratio_private"
+        return None, None
+
     if privacy == "Public":
         if pub_pct <= 0:
             return "100% private set — skipping public", "ratio_public"
@@ -3028,17 +3055,16 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         log_error(f"search goto failed: {query}", e)
         return joined, skipped
 
-    # Location filter sirf city search ke liye lagao — county search mein
-    # nahi (county naam is filter ke sath match nahi karta, galat results dete)
-    if "County" not in city:
-        filter_ok = await apply_fb_filters(page, city)
-        if not filter_ok:
-            # USA location filter nahi laga — bina filter ke Canada/wrong
-            # country ke groups aate hain, isliye yeh city chhor do
-            send_ui("log", text=f"   ⏭️  Skipping '{city}' — USA location filter could not be applied")
-            return joined, skipped
-    else:
-        send_ui("log", text=f"   ℹ️  County search — skipping location filter")
+    # Location filter HAR search par - county par bhi. Pehle county
+    # searches bina kisi filter ke chalti thin, is liye FB poore mulk ke
+    # groups de deta tha aur bot 40/60-mile radius se BAHAR join karta
+    # rehta tha. (Purani wajah "county naam match nahi karta" ab nahi
+    # rehti - state matching v80 mein theek ho chuki hai.)
+    filter_ok = await apply_fb_filters(page, city)
+    if not filter_ok:
+        send_ui("log", text=f"   ⏭️  Skipping '{city}' — location filter "
+                            f"could not be applied (would search outside the area)")
+        return joined, skipped
 
     # Scroll to load ALL groups for this query — "ek ek gali" ka group bhi
     # miss na ho. Pehle sirf 4 fixed scrolls the (bas pehla batch), ab jab
