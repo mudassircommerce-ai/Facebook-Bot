@@ -57,6 +57,25 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
 
 
+_REASON = {
+    "completed":       "finished normally",
+    "user_stop":       "stopped by the employee",
+    "nothing_left":    "no new groups left",
+    "account_blocked": "FACEBOOK BLOCK / checkpoint",
+    "pending_limit":   "join-request limit reached",
+    "license_expired": "LICENSE EXPIRED",
+    "gemini_down":     "Gemini keys failed",
+    "gemini_keys_failed": "Gemini keys failed (gave up)",
+    "service_paused":  "paused by the admin",
+    "setup_failed":    "pre-flight setup failed",
+    "file_tamper":     "bot files were modified",
+    "login_timeout":   "Facebook login timed out",
+    "no_page_link":    "page link missing/wrong",
+    "error":           "bot crashed",
+    "app_closed":      "window closed",
+}
+
+
 def _send_chat_text(text: str, sync: bool = False) -> None:
     """Ek raw text Discord/Telegram pe bhejo — ActivityLog instance ke
     BINA (module-level). Startup tamper-check jaise cases ke liye, jahan
@@ -255,6 +274,121 @@ class ActivityLog:
                 f"skipped: {s['skipped_total']}\n"
                 f"license expires: {s['license_exp'] or '—'}   ·   {s['last_update']}")
 
+    def set_health(self, score: int, state: str, why: str = "") -> None:
+        """Bot har heartbeat par account health yahan likhta hai, taake
+        combined report mein har profile ki health nazar aaye."""
+        try:
+            with self._lock:
+                self._data["health"] = {"score": int(score), "state": str(state),
+                                        "why": str(why)[:120]}
+                self._save()
+        except Exception:
+            pass
+
+
+    def _combined_status(self) -> str:
+        """Ek hi employee ki SAARI profiles ka mila-jula report.
+
+        Pehle har profile apni alag ek-line report bhejti thi - 4 bot
+        chalte to Discord par 4 alag messages aate the aur kisi ko poora
+        manzar nazar nahi aata tha. Ab employee ka naam upar, neeche uski
+        har profile - kitne join, chal rahi hai ya ruki (aur kyun)."""
+        today = date.today().isoformat()
+        rows = []
+        total = 0
+        try:
+            pref = "usage_" + _safe_name(self.employee)
+            for fn in sorted(os.listdir(_DIR)):
+                if not fn.startswith(pref) or not fn.endswith(".json"):
+                    continue
+                # "usage_Ahmed_2.json" chahiye, "usage_Ahmed Khan_2.json" nahi
+                tail = fn[len(pref):-5]
+                if tail and not (tail.startswith("_") and tail[1:].isdigit()):
+                    continue
+                try:
+                    with open(os.path.join(_DIR, fn), encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                inst = str(d.get("instance", tail.lstrip("_") or "1"))
+                j = d.get("daily", {}).get(today, 0)
+                total += j
+                sess = d.get("sessions", []) or []
+                live = any(x.get("stop") is None for x in sess)
+                # zinda tabhi jab heartbeat bhi taza ho (5 min)
+                if live:
+                    try:
+                        hb = datetime.fromisoformat(d.get("last_heartbeat", ""))
+                        live = (datetime.now() - hb).total_seconds() < 300
+                    except Exception:
+                        pass
+                if live:
+                    state = "RUNNING"
+                    icon = "\U0001f7e2"
+                else:
+                    why = ""
+                    for x in reversed(sess):
+                        if x.get("stop"):
+                            why = str(x.get("reason") or "")
+                            break
+                    state = "STOPPED" + (" - " + _REASON.get(why, why) if why else "")
+                    icon = "\u26a0\ufe0f" if why not in ("", "completed", "user_stop") else "\u26aa"
+                hh = d.get("health") or {}
+                hs = ""
+                if hh.get("score") is not None:
+                    hs = "  health " + str(hh.get("score")) + "/100"
+                    if hh.get("state") not in ("GOOD", None, ""):
+                        hs += " " + str(hh.get("state"))
+                rows.append((int(inst) if inst.isdigit() else 99, inst, j,
+                             icon, state + hs))
+        except Exception:
+            pass
+
+        if not rows:
+            return self._status_line()
+        rows.sort()
+        out = ["**" + self.employee + "**   (" + str(len(rows)) + " profile(s))"]
+        for _k, inst, j, icon, state in rows:
+            out.append("  " + icon + "  P" + inst.ljust(3) + " joined today: " + str(j).ljust(5) + " " + state)
+        out.append("  \u2500\u2500\u2500\u2500\u2500")
+        out.append("  TOTAL today: " + str(total) +
+                   "   |   license expires: " + (self.license_exp or "-"))
+        out.append("  " + _now())
+        return "\n".join(out)
+
+
+    def _claim_combined(self) -> bool:
+        """Ek employee ki chaar profiles chal rahi hon to combined report
+        sirf EK bheje - warna Discord par wahi message 4 baar aata.
+
+        Har 15-minute ke window ka apna marker file banta hai. Jo process
+        sab se pehle usay bana le (O_EXCL = atomic), wahi bhejta hai;
+        baqi chup rehte hain."""
+        try:
+            bucket = int(time.time() // 900)
+            safe = _safe_name(self.employee)
+            mark = os.path.join(_DIR, ".rep_" + safe + "_" + str(bucket))
+            try:
+                fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
+            except FileExistsError:
+                return False
+            # purane markers saaf karo
+            try:
+                for fn in os.listdir(_DIR):
+                    if fn.startswith(".rep_" + safe + "_"):
+                        try:
+                            if int(fn.rsplit("_", 1)[1]) < bucket - 4:
+                                os.remove(os.path.join(_DIR, fn))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return True
+
+
     def _push(self, event: str = "heartbeat") -> None:
         """
         event: start | stop | join | skip | heartbeat
@@ -275,9 +409,15 @@ class ActivityLog:
             if event not in ("start", "stop"):
                 if time.time() - getattr(self, "_last_chat", 0) < 900:
                     return
+                # is employee ki koi aur profile bhej chuki? to chup raho
+                if not self._claim_combined():
+                    self._last_chat = time.time()
+                    return
             self._last_chat = time.time()
             head = {"start": "▶️  STARTED\n", "stop": "⏹️  STOPPED\n"}.get(event, "")
-            text = head + self._status_line()
+            # 15-minute waala report ab employee ke hisaab se mila-jula
+            text = head + (self._combined_status() if event == "heartbeat"
+                           else self._status_line())
             if is_discord:
                 target, body = url, json.dumps({"content": text[:1900]}).encode("utf-8")
             else:

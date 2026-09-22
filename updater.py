@@ -84,6 +84,36 @@ def check_service(update_url: str) -> dict:
     }
 
 
+def fetch_license_key(update_url: str, employee: str) -> str:
+    """Admin ki publish ki hui keys.json se IS employee ki nayi key lo.
+
+    Owner  renew_keys.py  chala kar signed keys.json upload karta hai.
+    Bot use khud utha kar apni key laga leta hai - admin ko .fbjkey
+    bhejne ki zaroorat nahi rehti.
+
+    Signature galat / file na ho / net na ho -> "" (kuch nahi badalta)."""
+    update_url = (update_url or "").strip().rstrip("/")
+    if not update_url or not (employee or "").strip():
+        return ""
+    try:
+        data = json.loads(_get(update_url + "/keys.json", timeout=12).decode("utf-8"))
+    except Exception:
+        return ""
+    sig = data.pop("sig", "")
+    try:
+        import license_common as lic
+        body = json.dumps(data, separators=(",", ":"), sort_keys=True)
+        if not lic._verify(lic._b64u(body.encode()), sig,
+                           lic.LICENSE_PUBKEY_N, lic.LICENSE_PUBKEY_E):
+            return ""
+    except Exception:
+        return ""
+    keys = data.get("keys") or {}
+    if not isinstance(keys, dict):
+        return ""
+    return str(keys.get(employee.strip().lower(), "") or "")
+
+
 def service_allows(update_url: str, employee: str):
     """Is employee ka bot chal sakta hai? -> (bool, message)."""
     s = check_service(update_url)

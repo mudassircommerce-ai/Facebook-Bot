@@ -1,5 +1,5 @@
 {
- "version": 93,
+ "version": 98,
  "files": {
   "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
   "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
@@ -23,16 +23,16 @@
   "START_7.bat": "7ed1c162b037a9defa221c0ffb69706bfef3a8b38c836a1dccbc56ecf5d11130",
   "START_8.bat": "c0a8eae5557a2d1844ef910c6b85f35f2e4e6febf07c1c099dce6cf5acb89f71",
   "START_9.bat": "4ee454ea610af7cd5c356a32debb483b764af0ab61c70d3c04c926dea492666c",
-  "activity.py": "bef3ee3b75097a0175a13773c7589a0e758cf75bf4d4a725061e2ae5068d3a90",
+  "activity.py": "1c7c43d670844ac4b3d922e89ee27126a6c99c1c1b41274e83e7cb863aad55f5",
   "areas.py": "202148c14f41af32e6ca95c553d2886824ed756448ed7a24a1bcbf97045c8a17",
   "areas_cache.json": "d94e1f23c1648b786d8e9b9baf93acbf96c834303608180820bee28555fec355",
   "areas_cache_duct.json": "293c59ab8ee6b623e63e9ba1dd2b19a5c3911f29f1144d939da3391ab609ded6",
   "block_keywords.txt": "1752f090b4ab002e9c1207b7446e2098543b4d0b1af79e14c9d7c0e6f858bc41",
-  "fb_joiner.py": "a0b64a88a6038d7c7d83ccb13f464ffe72af91c1fc23ca486151f5894f895ca7",
+  "fb_joiner.py": "791b867b5681ab86440fbb3760e4c5ad0720d4494dbb794a67bd8e93af02029b",
   "keywords.txt": "1ac31a71d0d2f3efb0044876e340de14fc4277f00331673243fb5288fad04fed",
   "license_common.py": "ef2806dfb7b3887e8f079833ae7b0b0c8ab85aeaacdb940f3ff5ab82a42f9700",
   "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
-  "updater.py": "703b1b8dc67a9890abfdda217b9ef7ab456e023b0d2b266b5002833c0122b3cd"
+  "updater.py": "2dd151bd8df22f1b6e12ba2859f4ce18d5563885ff12a817aca53bba45597f21"
  },
- "sig": "MtnulsgMYJfRJmvOywwknzNcT9uByyrVJVCj3W4ECpXvjxTumVItNzsgH1ctBpCnJp-IOoIbpi1VoboTMkbXtRj4uwh1cOpzp0qAib5OvGjFh-Azz_K2YaXCNFkyxL7VRB5fWeyfQy8zQca_DLZBqVghuaiuNCpunJWg_NEmY6rs4mjtmuQ2fDQxivhmynw-YSi-vjg2bl5nNSY4DUwXfqUS87_jGkqO0kPGqprKC7aRwp4YmwKyrbsJtrYUWh22eJ0sZ5KUby317a6QThJS9rzZoLi5Nc3aKS0vquc4F0ypIGTOgOkrv-dsM4uafWj3hSgHyt6AxD27vBr4xpVmyQ"
+ "sig": "Ijda0oF3lY4vY41VhyNlXSSZotj3wSQOvgk1NhKxXT-v7NGRc1xb505LD80uv5NM6eszwoT7l_j8DHQ-vsygDkP8eCXE3Jt-7CEq5wm7Uv2soodBd4wTqbz7I1E1KMRiznjzGnhGqvr96bvU_mr7idUQJqfN6J0x1F7LAUhr5_h_0QGUmjvEhY3lFdO8AX0q2e7kNBRuNlgNbdtxZ6ozRJvQuWLbRaaRDL9eD5WkytD2vvW1xLDhYvFfeTIU1j_X16uQP4E1KvPNqyVyK_-Qikj4SGRnnrOggd2NIE_ihPeBCJ5K7bzcf7yMya4SFvpbthwSuC7uREG8qg5zL6vmjQ"
 }

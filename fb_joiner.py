@@ -360,19 +360,98 @@ GEMINI_RETRY_SEC = 300             # 5 minute
                              #  poora retry-pass skip karo, seedha template
 
 
+_SETTINGS_LOCK = SETTINGS_FILE + ".lock"
+
+
+class _settings_lock:
+    """Cross-process lock for bot_settings.json.
+
+    Ek hi folder ke saare profiles (START.bat, START_2.bat ...) EK HI
+    settings file likhte hain. Pehle koi lock nahi tha aur likhne ka
+    tareeqa read-modify-write tha, to 4 bot ek sath chalane par:
+      - do bot ek sath padhte, dono poori dict wapas likh dete
+        -> ek ki settings gayab
+      - open(...,"w") file ko pehle KHALI karta hai; usi lamhe koi
+        doosra bot padhe to usay khali/adhoori file milti thi
+        -> us bot ka page link / area / keywords sab urh jate the
+    Isi liye "4 bot chalao to ek na ek mein masla" hota tha."""
+
+    def __init__(self, timeout: float = 10.0):
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        end = time.time() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(_SETTINGS_LOCK,
+                                  os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                return self
+            except FileExistsError:
+                # atki hui (stale) lock - process mar gaya tha
+                try:
+                    if time.time() - os.path.getmtime(_SETTINGS_LOCK) > 30:
+                        os.remove(_SETTINGS_LOCK)
+                        continue
+                except Exception:
+                    pass
+                if time.time() > end:
+                    return self          # lock na mile to bhi aage barho
+                time.sleep(0.05)
+            except Exception:
+                return self
+
+    def __exit__(self, *a):
+        try:
+            if self.fd is not None:
+                os.close(self.fd)
+                os.remove(_SETTINGS_LOCK)
+        except Exception:
+            pass
+        return False
+
+
 def load_settings() -> dict:
-    try:
-        return json.load(open(SETTINGS_FILE, encoding="utf-8"))
-    except Exception:
-        return {}
+    """Settings padho. File adhoori/khali mile (koi aur bot usi waqt
+    likh raha ho) to chand baar dobara koshish karo."""
+    for _ in range(5):
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                txt = f.read()
+            if not txt.strip():
+                raise ValueError("empty")
+            return json.loads(txt)
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            time.sleep(0.08)
+    return {}
 
 
 def save_settings(d: dict) -> None:
+    """Atomic write - pehle temp file, phir os.replace(). Is se file
+    kabhi adhoori haalat mein nahi dikhti."""
     try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        tmp = SETTINGS_FILE + ".tmp" + str(os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SETTINGS_FILE)
     except Exception:
-        pass
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+def update_settings(changes: dict) -> None:
+    """Lock ke andar read-modify-write - doosre profile ki settings
+    overwrite nahi hongi."""
+    with _settings_lock():
+        s = load_settings()
+        s.update(changes)
+        save_settings(s)
 
 
 def _split_keys(text: str) -> list:
@@ -821,6 +900,7 @@ DEFAULT_SEARCH_KEYWORDS = [
 DEFAULT_MIN_MEMBERS = 1000  # UI ka default (employee badal sakta hai)
 BIG_MIN_MEMBERS = 5000      # is se upar warning dikhao
 LICENSE_WARN_DAYS = 2       # itne din bachne par renewal reminder
+DAILY_LIMIT = 200           # rozana ki had - LOCKED, employee badal nahi sakta
 REQUIRE_ACTIVITY = True     # join se pehle recent activity check
 ENGLISH_ONLY = True         # sirf English group
 
@@ -1380,6 +1460,95 @@ async def tick_checkboxes(page):
 
     return ticked
 
+async def ensure_agreement_ticked(page) -> bool:
+    """SUBMIT SE PEHLE LAAZMI: har "I agree to the group rules" type
+    checkbox par asal mein tick laga hua ho.
+
+    Pehle ye sweep SIRF tab chalta tha jab Submit button disabled ho.
+    Lekin Facebook aksar Submit enabled hi rakhta hai chahe agreement
+    box khali ho - to bot bina tick kiye request bhej deta tha aur group
+    admin usay reject kar deta tha. Ab ye har join par chalta hai:
+      1. agreement/consent wale box dhoondo
+      2. jo khali hain unhe click karo
+      3. DOBARA parh kar tasdeeq karo ke ab tick laga hai
+      4. na laga ho to phir click (3 koshish tak)
+
+    True = saare agreement box tick hain (ya koi tha hi nahi)."""
+    try:
+        boxes = await page.evaluate(r"""
+            () => {
+              const dlgs = [...document.querySelectorAll('div[role=dialog]')]
+                            .filter(d => d.offsetParent !== null);
+              const dlg = dlgs.length ? dlgs[dlgs.length - 1] : document;
+              const SEL = 'input[type=checkbox], [role=checkbox], [aria-checked]';
+              const isOn = el => el.getAttribute('aria-checked') === 'true'
+                              || el.checked === true;
+              const labOf = el => ((el.closest('label') ? el.closest('label').innerText : '')
+                        || el.getAttribute('aria-label')
+                        || (el.parentElement ? el.parentElement.innerText : '') || '')
+                        .trim().toLowerCase().slice(0, 120);
+              const NEG = /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline)(\W|$)/;
+              const AGREE = /(agree|accept|abide|consent|confirm|follow the rules|group rules|rules from|terms|i will|i promise|understand)/;
+              const out = [];
+              [...dlg.querySelectorAll(SEL)].forEach((el, i) => {
+                const l = labOf(el);
+                if (NEG.test(l)) return;
+                if (!AGREE.test(l)) return;
+                out.push({i: i, label: l, on: isOn(el)});
+                el.setAttribute('data-fbjagree', String(i));
+              });
+              return out;
+            }
+""")
+    except Exception:
+        return True                 # parh hi na sakein to join rokna nahi
+    if not boxes:
+        return True                 # is group mein aisa koi box hai hi nahi
+
+    for attempt in range(3):
+        pending = [b for b in boxes if not b.get("on")]
+        if not pending:
+            break
+        for b in pending:
+            try:
+                await page.evaluate(r"""
+            (idx) => {
+              const el = document.querySelector('[data-fbjagree="' + idx + '"]');
+              if (!el) return false;
+              const t = (el.tagName === 'INPUT' && el.offsetParent === null)
+                        ? (el.closest('label') || el.parentElement || el) : el;
+              try { t.click(); return true; } catch (e) { return false; }
+            }
+""", b["i"])
+            except Exception:
+                pass
+            await sleep(rand_delay(0.3, 0.6))
+        # tasdeeq - asal mein tick laga ya nahi
+        for b in boxes:
+            try:
+                v = await page.evaluate(r"""
+            (idx) => {
+              const el = document.querySelector('[data-fbjagree="' + idx + '"]');
+              if (!el) return null;
+              return el.getAttribute('aria-checked') === 'true' || el.checked === true;
+            }
+""", b["i"])
+                if v is not None:
+                    b["on"] = bool(v)
+            except Exception:
+                pass
+
+    still = [b for b in boxes if not b.get("on")]
+    done = len(boxes) - len(still)
+    if done:
+        send_ui("log", text=f"   \u2611\ufe0f Agreement verified: {done}/{len(boxes)} box(es) ticked")
+    if still:
+        send_ui("log", text=f"   \u26a0\ufe0f {len(still)} agreement box would NOT tick: "
+                            f"{still[0].get('label','')[:60]}")
+        return False
+    return True
+
+
 async def handle_questions(page):
     await sleep(1.5)
 
@@ -1710,6 +1879,12 @@ async def handle_questions(page):
             ticked += did
             send_ui("log", text=f"   ☑️ (last-resort) ticked {did} box(es) to enable Submit")
 
+    # ── LAAZMI: agreement checkbox tick hai? (Submit se PEHLE) ──
+    _agree_ok = await ensure_agreement_ticked(page)
+    if not _agree_ok:
+        send_ui("log", text="   \u26a0\ufe0f Submitting anyway — the box refused to tick "
+                            "(group may reject the request)")
+
     # ── Submit — aur confirm karo ke dialog band hua ──
     async def _submit_once():
         # 1) known selectors
@@ -1780,29 +1955,41 @@ async def handle_questions(page):
 def _extract_group_name(html: str, text: str) -> str:
     """Group ka ASLI naam page se nikalo.
 
-    Pehle naam sirf URL slug se banta tha — lekin 76% groups ka slug
-    numeric ID hota hai ("939950666418470"), to "don't-join" keyword check
-    ke paas match karne ko kuch hota hi nahi tha aur aise group join ho
-    jate the. og:title / <title> / <h1> se asli naam mil jata hai.
-    """
+    Naam sirf URL slug se banta tha - lekin 76% groups ka slug numeric ID
+    hota hai ("939950666418470"), to don't-join keyword check ke paas
+    match karne ko kuch hota hi nahi tha aur aise group join ho jate the.
+    og:title / <title> / <h1> se asli naam mil jata hai."""
+
+    def _clean(t):
+        t = html_mod.unescape(t or "").strip()
+        # FB title ke aage unread count lagata hai: "(20+) Group Name"
+        t = re.sub(r"^\(\d+\+?\)\s*", "", t).strip()
+        t = re.sub(r"\s*[|\-\u2013]\s*Facebook\s*$", "", t, flags=re.I).strip()
+        return t
+
     m = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]{2,160})"', html or "")
     if not m:
         m = re.search(r'<meta[^>]+content="([^"]{2,160})"[^>]+property="og:title"', html or "")
     if m:
-        n = html_mod.unescape(m.group(1)).strip()
+        n = _clean(m.group(1))
         if n and n.lower() not in ("facebook", "log in to facebook"):
             return n
 
     m = re.search(r"<title[^>]*>(.{2,200}?)</title>", html or "", re.S)
     if m:
-        n = html_mod.unescape(m.group(1)).strip()
-        n = re.sub(r"\s*[|\-–]\s*Facebook\s*$", "", n, flags=re.I).strip()
+        n = _clean(m.group(1))
         if n and n.lower() != "facebook":
             return n
 
+    # <h1> - group ka naam page par isi mein hota hai
+    for mm in re.finditer(r"<h1[^>]*>(.{2,200}?)</h1>", html or "", re.S):
+        n = _clean(re.sub(r"<[^>]+>", " ", mm.group(1)))
+        if n and n.lower() not in ("facebook", "groups", "menu"):
+            return n
+
     for ln in (text or "").splitlines():
-        ln = ln.strip()
-        if 2 < len(ln) < 120 and ln.lower() not in ("facebook", "menu"):
+        ln = _clean(ln)
+        if 2 < len(ln) < 120 and ln.lower() not in ("facebook", "menu", "groups"):
             return ln
     return ""
 
@@ -2588,37 +2775,57 @@ async def apply_fb_filters(page, city):
                 pass
 
         if loc_input:
-            await loc_input.click()
-            await sleep(0.5)
-            # Pehle field clear karo
-            await loc_input.press("Control+a")
-            await loc_input.press("Delete")
-            await sleep(0.3)
-            # Sirf city naam type karo (autocomplete trigger hogi)
-            await loc_input.type(city_name, delay=80)
-            await sleep(rand_delay(1.5, 2.5))
+            # Kya-kya type kar ke dekhna hai. SAB SE PEHLE poora
+            # "City, State" - pehle sirf city naam type hota tha, is liye
+            # 'Oxford' par Facebook mashhoor Oxford (England/Mississippi)
+            # dikhata tha aur Oxford CT kabhi list mein aata hi nahi tha.
+            # Nateeja: 4-47% targets "No suggestion" keh kar zaya ho rahe the.
+            tries = []
+            if state_full:
+                tries.append(f"{city_name}, {state_full}")
+            if state_abbr:
+                tries.append(f"{city_name}, {state_abbr}")
+            tries.append(city_name)
 
-            # Suggestion dropdown ka intezaar karo
             suggestion_sels = [
                 '[role="option"]',
                 '[role="listbox"] li',
                 'ul[role="listbox"] [role="option"]',
             ]
-            # Suggestion TABHI select karo jab woh USA ke SAHI state ka ho.
-            #
-            # BUG (fixed): pehle "United States" / ", US" bhi accept ho jata
-            # tha — yaani 'Arlington AZ' search karne par FB ka pehla
-            # suggestion "Arlington, Texas" chun liya jata tha aur bot poori
-            # us city ke Texas wale groups join karta rehta tha. Isi wajah se
-            # bot "apni marzi se doosre state" mein join kar raha tha.
-            # Ab state ka match LAAZMI hai; na mile to city skip ho jati hai.
             chosen = False
-            for s_sel in suggestion_sels:
-                opts = await page.locator(s_sel).all()
+            for typed in tries:
+                if chosen:
+                    break
+                try:
+                    await loc_input.click()
+                    await sleep(0.3)
+                    await loc_input.press("Control+a")
+                    await loc_input.press("Delete")
+                    await sleep(0.25)
+                    await loc_input.type(typed, delay=60)
+                except Exception:
+                    continue
+
+                # Dropdown ka intezaar - fixed sleep ke bajaye poll karo
+                opts = []
+                for _ in range(10):
+                    await sleep(0.35)
+                    for s_sel in suggestion_sels:
+                        try:
+                            found = await page.locator(s_sel).all()
+                        except Exception:
+                            found = []
+                        if found:
+                            opts = found
+                            break
+                    if opts:
+                        break
                 if not opts:
                     continue
 
-                cands = []   # (score, opt, opt_text)
+                # Sirf SAHI state wala suggestion - warna doosre state ke
+                # groups join hone lagte hain.
+                cands = []
                 for opt in opts:
                     try:
                         opt_text = (await opt.inner_text(timeout=600)).strip()
@@ -2628,7 +2835,6 @@ async def apply_fb_filters(page, city):
                         continue
                     if not _state_matches(opt_text, state_abbr, state_full):
                         continue
-                    # Sahi state mil gaya — ab city naam bhi match kare to behtar
                     first_part = opt_text.split(",")[0].strip().lower()
                     score = 2 if first_part == city_name.strip().lower() else \
                             1 if city_name.strip().lower() in first_part else 0
@@ -2644,22 +2850,22 @@ async def apply_fb_filters(page, city):
                         chosen = True
                     except Exception:
                         pass
-                if chosen:
-                    break
 
             if not chosen:
-                # Koi USA suggestion nahi mila — dropdown band karo.
-                # Bina USA filter ke search karna = Canada/doosre mulkon
-                # ke groups aa jate hain, isliye yeh city hi skip hogi.
+                # Sahi state ka koi suggestion nahi mila. Bina filter ke
+                # search karna = doosre state/mulk ke groups, isliye skip.
                 try:
                     await loc_input.press("Escape")
-                except:
+                except Exception:
                     pass
-                await loc_input.press("Control+a")
-                await loc_input.press("Delete")
-                send_ui("log", text=f"   ⚠️  No '{state_abbr or 'USA'}' suggestion "
-                                    f"for '{city_name}' — doosre state ka "
-                                    f"location nahi lagayenge")
+                try:
+                    await loc_input.press("Control+a")
+                    await loc_input.press("Delete")
+                except Exception:
+                    pass
+                send_ui("log", text=f"   ⚠️  No '{state_abbr or 'USA'}' match "
+                                    f"for '{city_name}' — skipping (won't use "
+                                    f"another state's location)")
             return chosen
         return False
     except Exception as e:
@@ -2742,6 +2948,61 @@ async def _goto_retry(page, url, timeout: int = 20000, tries: int = 2):
     raise last
 
 
+# ── Account health (#19) ──────────────────────────
+# Facebook block ek din mein nahi aata - pehle chhote ishare aate hain:
+# "already member" barhta hai, page load fail hone lagte hain, join button
+# milna band ho jata hai, block markers dikhne lagte hain. Ye score unhi
+# ishaaron ko ginta hai taake account band hone SE PEHLE pata chal jaye.
+_HEALTH = {"joins": 0, "errors": 0, "no_button": 0, "block_hits": 0,
+           "already": 0, "pending_hits": 0}
+
+
+def health_note(kind: str) -> None:
+    """Ek signal record karo (joins / errors / no_button / block_hits /
+    already / pending_hits)."""
+    if kind in _HEALTH:
+        _HEALTH[kind] += 1
+
+
+def health_score() -> tuple:
+    """(score 0-100, halat, wajah) wapas do. 100 = bilkul theek."""
+    h = _HEALTH
+    tried = max(1, h["joins"] + h["errors"] + h["no_button"])
+    score = 100
+    why = []
+
+    # block ke ishare sab se bhaari
+    if h["block_hits"]:
+        score -= min(50, 25 * h["block_hits"])
+        why.append(str(h["block_hits"]) + "x block signal")
+    if h["pending_hits"]:
+        score -= min(25, 25 * h["pending_hits"])
+        why.append("join-request limit hit")
+
+    # join button hi na mile = FB rok raha hai
+    nb = h["no_button"] / tried
+    if nb > 0.25:
+        score -= min(25, int(nb * 60))
+        why.append(str(round(nb * 100)) + "% no join button")
+
+    # page load fail
+    er = h["errors"] / tried
+    if er > 0.15:
+        score -= min(20, int(er * 50))
+        why.append(str(round(er * 100)) + "% page errors")
+
+    score = max(0, min(100, score))
+    if score >= 80:
+        state = "GOOD"
+    elif score >= 55:
+        state = "WATCH"
+    elif score >= 30:
+        state = "RISKY"
+    else:
+        state = "DANGER"
+    return score, state, ", ".join(why) or "no warning signs"
+
+
 async def alert_ss(page, config, reason: str, detail: str = "") -> None:
     """Bot ruk-ne / limit / restriction par: SCREENSHOT lo aur wajah ke
     sath Discord par bhejo.
@@ -2766,7 +3027,10 @@ async def alert_ss(page, config, reason: str, detail: str = "") -> None:
         url = page.url or ""
     except Exception:
         pass
+    _sc, _st, _why = health_score()
     txt = ("**" + reason + "**" + "\n" + (detail or "") + "\n" +
+           "account health: " + str(_sc) + "/100 " + _st +
+           " (" + _why + ")" + "\n" +
            "profile: " + str(SUFFIX or "1") + "  |  today: " +
            str(config.get("_today_total", "?")) + "/" +
            str(config.get("daily_limit", "?")) + "\n" + "page: " + url[:200])
@@ -2809,6 +3073,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
 
         blk = await check_account_block(page, body_txt)
         if blk:
+            health_note("block_hits")
             send_ui("log", text=f"⚠️ Possible block signal ('{blk}') — re-checking in 15s…")
             blk = await confirm_account_block(page, blk)
         if blk:
@@ -2828,6 +3093,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         # hi turant nikal jao — aur is baar hamesha ke liye save kar do.
         if any(m in body_txt for m in
                ("Leave group", "Joined", "Member ·", "You're a member")):
+            health_note("already")
             send_ui("log", text=f"⏭️  Already member: {name}")
             log_csv(area, name, url, "already_member", 0, "?")
             save_joined(url)
@@ -2841,6 +3107,16 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         # Page se asli naam mil gaya to usi ko aage use karo — slug wala
         # naam (aksar sirf numeric ID) na log mein kaam ka tha, na
         # don't-join keyword check mein.
+        if not gname:
+            # FB ka SPA kabhi title/og:title der se bharta hai. Ek chhoti
+            # dobara koshish - 14% groups ka naam isi wajah se khali reh
+            # jata tha aur un par don't-join check bekaar ho jata tha.
+            await sleep(rand_delay(1.2, 2.0))
+            try:
+                gname = _extract_group_name(await page.content(),
+                                            await page.inner_text("body"))
+            except Exception:
+                pass
         if gname:
             name = gname
 
@@ -2860,7 +3136,13 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             title = (await page.title()).lower()
         except:
             title = ""
-        check_text = f"{name.lower()} {title}"
+        # Naam mil gaya to naam+title par check. Naam phir bhi na mile to
+        # group ke apne text par - warna wo bina kisi jaanch ke join ho
+        # jata tha.
+        if gname:
+            check_text = f"{name.lower()} {title}"
+        else:
+            check_text = f"{name.lower()} {title} {body_txt[:1500].lower()}"
         all_blocked = BLOCKED_GROUP_KEYWORDS + list(config.get("custom_blocked", []))
         bad_kw = next((kw for kw in all_blocked if kw and _kw_hit(kw, check_text)), None)
         if bad_kw:
@@ -2949,6 +3231,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         clicked = await click_join(page)
         if not clicked:
             send_ui("log", text=f"⏭️  Join button not found, skip: {name}")
+            health_note("no_button")
             log_csv(area, name, url, "no_button", members, privacy)
             return "skipped"
 
@@ -2961,6 +3244,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             after_txt = ""
         if check_pending_limit(after_txt):
             send_ui("log", text="⏸️  Join-request limit reached (too many pending groups) — stopping the bot")
+            health_note("pending_hits")
             await alert_ss(page, config, "JOIN-REQUEST LIMIT reached",
                            "Too many pending requests. Bot stopped. Let some "
                            "requests get approved/cancelled, then start again.")
@@ -2992,6 +3276,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         send_ui("log", text=f"✅ Joined: {name} ({members} members | {privacy}){_mix}")
         log_csv(area, name, url, "joined", members, privacy)
         save_joined(url)
+        health_note("joins")
         return "joined"
 
     except Exception as e:
@@ -3014,6 +3299,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             send_ui("log", text=f"🔁 Browser lost ({str(e)[:60]}) — will relaunch and continue.")
             raise
         send_ui("log", text=f"⏭️  Error: {str(e)[:80]}")
+        health_note("errors")
         log_csv(area, name, url, "error")
         return "skipped"
 
@@ -3364,7 +3650,7 @@ async def playwright_main(config):
     skipped_today = 0
     if joined_today:
         send_ui("log", text=f"↻ {joined_today} groups already joined today — "
-                            f"continuing from here (limit {config.get('daily_limit', 250)}).")
+                            f"continuing from here (limit {config.get('daily_limit', DAILY_LIMIT)}).")
         send_ui("joined", count=joined_today)
 
     async with async_playwright() as p:
@@ -3442,6 +3728,9 @@ async def playwright_main(config):
                     return
                 if act:
                     try:
+                        # account health har heartbeat par usage file mein
+                        _sc, _st, _why = health_score()
+                        act.set_health(_sc, _st, _why)
                         act.heartbeat()
                     except Exception:
                         pass
@@ -3515,6 +3804,12 @@ async def playwright_main(config):
                     return
                 chk = lic.validate_key(config.get("license_key", ""))
                 if not chk["ok"]:
+                    # rukne se PEHLE: admin ne nayi key publish ki ho to
+                    # khud laga lo aur chalte raho
+                    if auto_renew_license(config.get("employee", "")):
+                        config["license_key"] = lic.load_active_key()
+                        chk = lic.validate_key(config["license_key"])
+                if not chk["ok"]:
                     send_ui("log", text=f"⛔ License: {chk['error']}")
                     send_ui("log", text="   Bot is stopping — activate a new key and press START again.")
                     _alert_wrong_pc(chk)
@@ -3564,6 +3859,22 @@ async def playwright_main(config):
             areas_to_run = [selection] + _others
 
         total_areas = len(areas_to_run)
+        # START ki screenshot + settings Discord par - sab kuch set hone
+        # ke baad (page, area, mode). Admin ko turant pata chal jata hai
+        # kis ne kya laga kar bot chalaya.
+        try:
+            await alert_ss(page, config, "BOT STARTED",
+                           f"page: {config.get('page_link','') or '-'}"
+                           f"{chr(10)}area: {selection}"
+                           f"{chr(10)}mode: {_mode.upper()}  ({total_areas} areas queued)"
+                           f"{chr(10)}mix: {config.get('public_pct', 30)}% public"
+                           f"  |  min members: {config.get('min_members_public')} pub / "
+                           f"{config.get('min_members_private')} priv"
+                           f"{chr(10)}daily limit: {limit}"
+                           f"{chr(10)}AI keys: {len(GEMINI_KEYS)}")
+        except Exception:
+            pass
+
         send_ui("log", text=f"📍 {total_areas} area(s) queued "
                             f"— bot won't stop when one finishes, it moves to the next.")
 
@@ -3707,7 +4018,7 @@ async def playwright_main(config):
             except Exception:
                 pass
         send_ui("log", text=f"\n🎉 This run: joined {_this_run} groups, skipped {skipped_today}. "
-                            f"Today's total: {joined_today}/{config.get('daily_limit', 250)}.")
+                            f"Today's total: {joined_today}/{config.get('daily_limit', DAILY_LIMIT)}.")
         await ctx.close()
 
 async def _login_browser_main():
@@ -3750,6 +4061,45 @@ async def _login_browser_main():
                              "ℹ️ Browser closed. If you didn't log in, click "
                              "'Open browser' again."))
     send_ui("login_done")
+
+
+def auto_renew_license(employee: str = "") -> str:
+    """Admin ki publish ki hui keys.json se nayi key khud laga lo.
+
+    Admin  renew_keys.py  chala kar signed keys.json upload karta hai.
+    Bot START par aur har 2 min chalte hue dekhta hai: agar wahan meri
+    key mojood hai aur uski expiry MERI maujooda key se AAGE hai, to usay
+    laga lo. Is se employee ko admin se key maangni hi nahi padti.
+
+    Nayi key lagi to uska employee naam wapas, warna "".
+
+    Mehfooz kyun: keys.json admin ki private key se signed hai, aur bot
+    sirf USI key ko qubool karta hai jo apne naam par ho aur waqai valid
+    ho. Koi employee na key bana sakta hai, na kisi aur ki laga sakta hai."""
+    try:
+        import updater as _u
+        cur = lic.load_active_key()
+        cur_info = lic.validate_key(cur, enforce_machine=False, check_url=False) if cur else {}
+        emp = (employee or cur_info.get("employee", "") or "").strip()
+        if not emp:
+            return ""
+        newk = _u.fetch_license_key(getattr(lic, "UPDATE_URL", ""), emp)
+        if not newk or newk.strip() == (cur or "").strip():
+            return ""
+        ni = lic.validate_key(newk, check_url=False)
+        if not ni.get("ok"):
+            return ""
+        if (ni.get("employee", "").strip().lower() != emp.lower()):
+            return ""
+        # sirf tab lagao jab ye maujooda se AAGE tak chale
+        if cur_info.get("exp") and ni.get("exp", "") <= cur_info.get("exp", ""):
+            return ""
+        lic.save_active_key(newk)
+        send_ui("log", text=f"\U0001f511 License auto-renewed \u2014 now valid until "
+                            f"{ni.get('exp','')[:10]} ({ni.get('time_left','')})")
+        return emp
+    except Exception:
+        return ""
 
 
 def _launch_error_hint(e: Exception) -> str:
@@ -4679,7 +5029,7 @@ def run_playwright(config):
     _normal = ("completed", "user_stop", "nothing_left")
     _run_j = config.get("_run_joined")
     _tot   = config.get("_today_total")
-    _lim   = config.get("daily_limit", 250)
+    _lim   = config.get("daily_limit", DAILY_LIMIT)
 
     if _reason == "completed":
         if _run_j == 0 and _tot is not None and _tot >= _lim:
@@ -4891,21 +5241,18 @@ class App:
                 text="AI answers: OFF — using built-in template answers", fg=TXT_MUTED)
 
     def _persist_gemini(self):
-        s = load_settings()
-        s["gemini_keys"] = resolve_gemini_keys(self._gemini_box_text())
-        save_settings(s)
+        update_settings({"gemini_keys": resolve_gemini_keys(self._gemini_box_text())})
 
     def _persist_simple(self):
         """Page link + area + business mode turant save — har profile ka apna
         alag, taake dobara khulne par bhare rahein aur ek doosre ko overwrite
         na karein."""
         try:
-            s = load_settings()
-            s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
-            s[f"city{SUFFIX}"] = self.city_var.get().strip()
+            ch = {f"page_link{SUFFIX}": self.page_link_var.get().strip(),
+                  f"city{SUFFIX}": self.city_var.get().strip()}
             if hasattr(self, "business_var"):
-                s[f"business_mode{SUFFIX}"] = self.business_var.get()
-            save_settings(s)
+                ch[f"business_mode{SUFFIX}"] = self.business_var.get()
+            update_settings(ch)
         except Exception:
             pass
 
@@ -4967,6 +5314,10 @@ class App:
         def work():
             try:
                 info = lic.validate_key(lic.load_active_key(), check_url=True)
+                # expire ho gayi / hone wali hai -> nayi key utha lo
+                if not info.get("ok") or int(info.get("days_left", 99) or 0) <= LICENSE_WARN_DAYS:
+                    if auto_renew_license(info.get("employee", "")):
+                        info = lic.validate_key(lic.load_active_key(), check_url=False)
             except Exception:
                 info = None
             if self._alive():
@@ -5088,6 +5439,16 @@ class App:
     def _license_gate(self):
         if self.lic_info.get("ok"):
             return
+        # Key expire ho chuki hai? Activation window dikhane se PEHLE dekho
+        # ke admin ne nayi key publish to nahi kar di - agar ki hai to khud
+        # laga lo aur employee ko kuch karna hi na pade.
+        try:
+            if auto_renew_license(self.lic_info.get("employee", "")):
+                self._refresh_license_ui()
+                if self.lic_info.get("ok"):
+                    return
+        except Exception:
+            pass
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Activation Required")
@@ -5505,8 +5866,16 @@ class App:
             _v.trace_add("write", lambda *a: self._refresh_big_min_warning())
 
         self._label(card, "Daily limit")
-        self.daily_limit_var = tk.IntVar(value=250)
-        self._entry(card, self.daily_limit_var, pady=(0, 2))
+        # Daily limit ab LOCKED hai - admin ki tay-shuda policy. Pehle
+        # employee ise badal sakta tha (250 se upar le jata to ban ka
+        # khatra, neeche le jata to kaam kam).
+        self.daily_limit_var = tk.IntVar(value=DAILY_LIMIT)
+        _dl = tk.Frame(card, bg=CARD_BG); _dl.pack(fill="x", pady=(0, 2))
+        tk.Label(_dl, text=str(DAILY_LIMIT), font=F_BODY, bg=INPUT_BG, fg=TXT_MUTED,
+                 relief="flat", width=8, anchor="w", padx=6
+                 ).pack(side="left", ipady=4)
+        tk.Label(_dl, text="\U0001f512  set by the admin", bg=CARD_BG,
+                 fg=TXT_MUTED, font=F_SMALL).pack(side="left", padx=(10, 0))
 
         row2 = tk.Frame(card, bg=CARD_BG); row2.pack(fill="x")
         col3 = tk.Frame(row2, bg=CARD_BG); col3.pack(side="left", expand=True, fill="x", padx=(0, 6))
@@ -5938,7 +6307,7 @@ class App:
                 "city":        city,
                 "page_name":   DEFAULT_PAGE_NAME,
                 "page_link":   self.page_link_var.get().strip(),
-                "daily_limit": self.daily_limit_var.get(),
+                "daily_limit": DAILY_LIMIT,
                 "delay_min":   self.delay_min_var.get(),
                 "delay_max":   self.delay_max_var.get(),
                 "employee":    self.lic_info.get("employee", "") or "unknown",
@@ -5960,19 +6329,19 @@ class App:
                 "business_mode": self.business_var.get(),
             }
             self._persist_gemini()          # remember keys for next time
-            s = load_settings()
-            s[f"page_link{SUFFIX}"] = self.page_link_var.get().strip()
-            s[f"city{SUFFIX}"] = self.city_var.get().strip()
-            s[f"business_mode{SUFFIX}"] = self.business_var.get()
-            s["public_pct"] = self._public_pct()
-            s["min_members_public"] = self._min_pub()
-            s["min_members_private"] = self._min_priv()
-            s["skip_no_post"] = bool(self.skip_nopost_var.get())
-            s["same_state_only"] = bool(self.same_state_var.get())
-            s["include_counties"] = bool(self.include_counties_var.get())
-            s["block_keywords"] = self._block_keywords()
-            s["search_keywords"] = self._search_keywords()
-            save_settings(s)
+            update_settings({
+                f"page_link{SUFFIX}":     self.page_link_var.get().strip(),
+                f"city{SUFFIX}":          self.city_var.get().strip(),
+                f"business_mode{SUFFIX}": self.business_var.get(),
+                "public_pct":          self._public_pct(),
+                "min_members_public":  self._min_pub(),
+                "min_members_private": self._min_priv(),
+                "skip_no_post":     bool(self.skip_nopost_var.get()),
+                "same_state_only":  bool(self.same_state_var.get()),
+                "include_counties": bool(self.include_counties_var.get()),
+                "block_keywords":   self._block_keywords(),
+                "search_keywords":  self._search_keywords(),
+            })
             self._refresh_gemini_status()
             threading.Thread(target=run_playwright, args=(config,), daemon=True).start()
 
@@ -6003,7 +6372,7 @@ class App:
         try:
             lim = max(1, int(self.daily_limit_var.get()))
         except Exception:
-            lim = 250
+            lim = DAILY_LIMIT
         pct = min(100, round(self.joined_today / lim * 100))
         return f"/ {lim}   ·   {pct}%  joined"
 
