@@ -34,9 +34,12 @@ py -m playwright install chromium
 if errorlevel 1 goto FAIL
 
 :RUN
-rem Naya web-style dashboard (desktop app window). pythonw = koi console nahi.
+rem Naya web-style dashboard (desktop app window).
+rem pyw = windowless launcher (py ke sath aata hai) -> koi black console nahi.
+rem pyw na mile to py se chalao (console dikhega lekin chalega).
 rem Purana tkinter UI backup: is folder mein  py fb_joiner.py 16
-start "" pythonw fb_joiner_ui.py 16
+where pyw >nul 2>&1 && ( start "" pyw fb_joiner_ui.py 16 & exit /b 0 )
+start "" py fb_joiner_ui.py 16
 exit /b 0
 
 :NOPY
