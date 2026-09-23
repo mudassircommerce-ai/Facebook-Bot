@@ -111,7 +111,12 @@ DUCT_AREAS = [
 AREAS = CAR_AREAS
 
 # mode string -> list
-AREA_LISTS = {"car": CAR_AREAS, "duct": DUCT_AREAS}
+# GARAGE — sirf ADMIN key par. Areas Muzammil baad mein denge.
+GARAGE_AREAS = [
+    # yahan garage door / garage business ke areas aayenge
+]
+
+AREA_LISTS = {"car": CAR_AREAS, "duct": DUCT_AREAS, "garage": GARAGE_AREAS}
 
 def areas_for(mode: str):
     return AREA_LISTS.get((mode or "car").lower(), CAR_AREAS)

@@ -34,8 +34,9 @@ py -m playwright install chromium
 if errorlevel 1 goto FAIL
 
 :RUN
-py fb_joiner.py 20
-if errorlevel 1 pause
+rem Naya web-style dashboard (desktop app window). pythonw = koi console nahi.
+rem Purana tkinter UI backup: is folder mein  py fb_joiner.py 20
+start "" pythonw fb_joiner_ui.py 20
 exit /b 0
 
 :NOPY

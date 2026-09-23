@@ -29,7 +29,7 @@ UPDATABLE = {
     "fb_joiner.py", "license_common.py", "activity.py", "updater.py",
     "areas.py", "areas_cache.json", "areas_cache_duct.json", "logout_account.py",
     "block_keywords.txt", "keywords.txt", "EMPLOYEE_SETUP.txt", "READ_ME_FIRST.txt",
-    "README.txt", "START.bat",
+    "README.txt", "START.bat", "fb_joiner_ui.py", "ui_page.html",
 } | {f"START_{n}.bat" for n in range(2, 21)}   # 20 profiles ki capacity
 
 

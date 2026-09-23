@@ -3964,13 +3964,31 @@ async def playwright_main(config):
                 send_ui("log", text=f"   ✅ Area '{area}' done: +{area_joined} groups "
                                     f"({_wordings} wording(s) tried)")
 
-            # Poora pass khatam — is pass mein kuch mila?
+            # Poora pass khatam - is pass mein kuch mila?
             if joined_today - _round_start == 0:
-                send_ui("log", text="\nℹ️ Full pass over all areas found no new groups "
-                                    "to join right now. Nothing left — you can run again later.")
+                # Duct Safe Mode: rukna NAHI. Thoda intezaar, reshuffle,
+                # phir dobara - taake groups "khatam" hone par bhi bot
+                # chalta rahe (naye groups bante rehte hain).
+                if config.get("safe_mode"):
+                    if stop_event.is_set() or joined_today >= limit:
+                        break
+                    _wait = 15 * 60
+                    send_ui("log", text=f"\n🛡 Safe Mode: no new groups "
+                                        f"this pass — resting 15 min, then "
+                                        f"re-scanning all duct areas. Bot stays on.")
+                    _end = time.time() + _wait
+                    while time.time() < _end and not stop_event.is_set():
+                        time.sleep(3)
+                        _bump_activity()
+                    random.shuffle(areas_to_run)
+                    continue
+                send_ui("log", text="\nℹ️ Full pass over all areas found "
+                                    "no new groups to join right now. Nothing left "
+                                    "— you can run again later.")
                 config["_end_reason"] = "nothing_left"
                 break
-            if _round >= 110:    # safety — infinite loop se bacho (101 templates + bare naam)
+            if _round >= 110 and not config.get("safe_mode"):
+                break    # safety cap - Safe Mode ise nazarandaz karta hai
                 break
 
         try:
@@ -5133,6 +5151,7 @@ class App:
         self._refresh_big_min_warning()
         self._refresh_license_ui()             # fast, local-only check
         self._license_gate()                   # <-- ask for a key BEFORE anything else
+        self._security_popup()          # bot khulte hi security alert
         if self._alive():
             self._poll()
             # Networked re-check (revocation URL) shortly after the window opens,
@@ -5253,6 +5272,24 @@ class App:
             if hasattr(self, "business_var"):
                 ch[f"business_mode{SUFFIX}"] = self.business_var.get()
             update_settings(ch)
+        except Exception:
+            pass
+
+    def _on_safe_toggle(self):
+        """Duct Safe Mode on -> Duct + All-areas force karo aur un controls
+        ko lock kar do (safe mode khud sambhaal leta hai)."""
+        on = bool(self.safe_mode_var.get())
+        try:
+            if on:
+                self.business_var.set("duct")
+                self._on_business_change()
+                self.city_var.set(ALL_AREAS_LABEL)
+                self.public_pct_var.set(0)
+                self._refresh_mix_lbl()
+            st = "disabled" if on else "normal"
+            for _b in self._biz_btns.values():
+                _b.config(state=st)
+            self.area_combo.config(state=("disabled" if on else "normal"))
         except Exception:
             pass
 
@@ -5436,6 +5473,30 @@ class App:
             "PC-locked key.")
 
     # ── Startup license gate — modal, blocks the app until activated ──
+    def _security_popup(self):
+        """Bot khulte hi ek dafa security alert. Employee ko OK dabana
+        parta hai - nazarandaz nahi kar sakta."""
+        if getattr(self, "_sec_shown", False):
+            return
+        self._sec_shown = True
+        info = self.lic_info if self.lic_info.get("ok") else \
+            lic.validate_key(lic.load_active_key(), check_url=False)
+        emp = info.get("employee", "") or "this device"
+        mid = (lic.machine_id() or "")[:12]
+        try:
+            messagebox.showwarning(
+                "🔒  Security Notice",
+                f"Licensed to: {emp}\n"
+                f"Locked to this PC: {mid}\n\n"
+                "All activity — start/stop, machine ID and "
+                "network address — is logged and reported to "
+                "the admin in real time.\n\n"
+                "Property of NexFour Solution. Sharing, copying or using "
+                "it outside the office is illegal and legal action will "
+                "be taken.")
+        except Exception:
+            pass
+
     def _license_gate(self):
         if self.lic_info.get("ok"):
             return
@@ -5699,7 +5760,6 @@ class App:
                                 fg=TXT_MUTED, font=("Segoe UI", 9, "bold"),
                                 anchor="w")
         self.lic_lbl.pack(fill="x", padx=16, pady=(0, 4))
-
         self.lic_row = tk.Frame(hdr, bg=CARD_BG)
         self.key_entry_var = tk.StringVar()
         tk.Entry(self.lic_row, textvariable=self.key_entry_var, font=("Consolas", 9),
@@ -5830,6 +5890,15 @@ class App:
             self._biz_btns[_key] = b
         for _k, _b in self._biz_btns.items():
             _b.config(fg=("white" if _k == self.business_var.get() else TXT_MUTED))
+
+        # Duct Safe Mode: sirf PRIVATE, saare DUCT areas random tarteeb mein,
+        # aur groups khatam hone par rukta NAHI - reshuffle karke chalta
+        # rehta hai. Business=Duct, Area=ALL, Public%=0 khud lag jate hain.
+        self.safe_mode_var = tk.BooleanVar(value=bool(_s0.get("safe_mode", False)))
+        self._check(card,
+                    "🛡  Duct Safe Mode  ·  private-only, all duct areas, never stops",
+                    self.safe_mode_var)
+        self.safe_mode_var.trace_add("write", lambda *a: self._on_safe_toggle())
 
         self._label(card, "Area")
         self.city_var = tk.StringVar(
@@ -6285,6 +6354,9 @@ class App:
             if not city:
                 self.city_var.set("⚠ Enter an area!")
                 return
+
+            # ── Security alert — har START par ──────────────
+
             stop_event.clear()
             user_stop_event.clear()
             _GEMINI_DOWN.clear()
@@ -6327,7 +6399,12 @@ class App:
                 "_search_templates": resolve_search_keywords(
                     "\n".join(self._search_keywords())),
                 "business_mode": self.business_var.get(),
+                "safe_mode": bool(self.safe_mode_var.get()),
             }
+            # Duct Safe Mode -> private-only pakka karo (0% public)
+            if config["safe_mode"]:
+                config["public_pct"] = 0
+                config["business_mode"] = "duct"
             self._persist_gemini()          # remember keys for next time
             update_settings({
                 f"page_link{SUFFIX}":     self.page_link_var.get().strip(),
@@ -6341,6 +6418,7 @@ class App:
                 "include_counties": bool(self.include_counties_var.get()),
                 "block_keywords":   self._block_keywords(),
                 "search_keywords":  self._search_keywords(),
+                "safe_mode":        bool(self.safe_mode_var.get()),
             })
             self._refresh_gemini_status()
             threading.Thread(target=run_playwright, args=(config,), daemon=True).start()
