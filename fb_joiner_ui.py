@@ -47,14 +47,27 @@ _SETTINGS_SENT = [False]
 
 def _classify(text):
     t = (text or "").strip(); low = t.lower()
+    # Auto-recovery / transient \u2014 ye bot KHUD sambhaal leta hai, "FAILED"
+    # NAHI. (Pehle inhe fail gina jata tha, jis se log red se bhar jata aur
+    # "bahut crash" lagta, jabke bot chalta rehta hai.)
+    if any(k in low for k in ("relaunch", "auto-restart", "auto-restarting",
+                              "restarting it", "will relaunch", "no progress",
+                              "browser lost", "browser was stuck", "resuming",
+                              "continues by itself", "recovery")):
+        return "info", ""
     if ("\u2705" in t or "\U0001f389" in t or "joined:" in low or t.startswith("\u2611")):
         return "ok", "SUCCESS"
-    if any(k in low for k in ("account block", "account checkpoint", "crash",
-                              "could not", "failed", "error")) or "\u26d4" in t or "\U0001f6ab" in t or "\u274c" in t:
+    # Sirf ASAL, rukne wale masle = FAILED
+    if (any(k in low for k in ("account block", "account checkpoint",
+                               "license expired", "license invalid",
+                               "can't join any more", "cannot join any more",
+                               "join-request limit", "pending limit"))
+            or "\u26d4" in t or "\U0001f6ab" in t):
         return "fail", "FAILED"
     if ("\u23ed" in t or "\u2696" in t or "\U0001f4a4" in t or "\U0001f341" in t
             or any(k in low for k in ("skip", "blocked keyword", "quota",
-                                      "already member", "wrong state", "low "))):
+                                      "already member", "wrong state", "low ",
+                                      "error", "could not", "didn't load", "timeout"))):
         return "skip", "SKIPPED"
     return "info", ""
 

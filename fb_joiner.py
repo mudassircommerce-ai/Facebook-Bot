@@ -1133,6 +1133,16 @@ def _target_state(target: str) -> str:
     return p[-1] if p and len(p[-1]) == 2 and p[-1].isupper() else ""
 
 
+def _radius_for(mode: str) -> int:
+    """Har business ka search radius (miles). Car 40, Garage 50, Duct 60."""
+    m = (mode or "car").lower()
+    if m == "duct":
+        return 60
+    if m == "garage":
+        return 50
+    return 40
+
+
 def get_targets_for_area(area: str, same_state_only: bool = True,
                           include_counties: bool = True, mode: str = "car") -> list:
     """
@@ -1153,7 +1163,7 @@ def get_targets_for_area(area: str, same_state_only: bool = True,
         if include_counties:
             targets += list(cached.get("counties", []))
     else:
-        targets = get_nearby_cities(area, 60 if (mode or "").lower() == "duct" else 40)
+        targets = get_nearby_cities(area, _radius_for(mode))
 
     if same_state_only:
         st = _area_state_code(area)
@@ -1353,12 +1363,29 @@ async def tick_checkboxes(page):
     _NEG = ("no", "nope", "disagree", "i don't", "i do not", "i won't",
             "decline", "not agree", "false")
 
+    # TRAP options — inhe kabhi tick NAHI karna, chahe "yes" bhi likha ho.
+    # (Bug: "Yes! Selecting this box disqualifies you" tick ho jata tha ->
+    #  form disqualify -> submit fail -> bot 6 min hang -> browser restart.)
+    # Sirf SAAF negative-anjaam wale traps. "selecting this" jaisa aam
+    # jumla NAHI (warna "selecting this = you agree" bhi skip ho jata).
+    _TRAP = ("disqualif", "do not select", "don't select", "dont select",
+             "do not check", "don't check", "leave this box", "leave it unchecked",
+             "leave this unchecked", "will be removed", "will be rejected",
+             "not eligible", "removes you", "removed from the group",
+             "ban you", "get you removed", "reject your request", "declined if")
+
+    def _is_trap(t):
+        return any(w in (t or "").lower() for w in _TRAP)
+
     def _is_neg(t):
         t = (t or "").strip().lower()
-        return t in ("no", "nope") or any(t.startswith(n) for n in _NEG)
+        return (t in ("no", "nope") or any(t.startswith(n) for n in _NEG)
+                or _is_trap(t))
 
     def _is_aff(t):
         t = (t or "").strip().lower()
+        if _is_trap(t):
+            return False
         return (t in ("yes", "yeah", "yep", "i agree", "agree", "i do", "true")
                 or any(w in t for w in ("yes", "agree", "i do", "promise",
                                         "accept", "i will", "confirm", "i am",
@@ -1754,7 +1781,7 @@ async def handle_questions(page):
                       || (el.parentElement ? el.parentElement.innerText : '') || '';
                 return t.trim().toLowerCase().slice(0, 90);
               };
-              const isNeg = l => /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline|false)(\W|$)/.test(l);
+              const isNeg = l => /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline|false)(\W|$)/.test(l) || /(disqualif|do ?not ?(select|check)|don'?t ?(select|check)|leave (this|it) (box )?unchecked|will be (removed|rejected)|not eligible|removes? you|removed from the group|ban you|get you removed|reject your request)/.test(l);
               let boxes = [...dlg.querySelectorAll(SEL)]
                 .filter(el => el.tagName === 'INPUT' || el.offsetParent !== null
                               || (el.getClientRects && el.getClientRects().length));
@@ -1865,7 +1892,7 @@ async def handle_questions(page):
                         || el.getAttribute('aria-label')
                         || (el.parentElement ? el.parentElement.innerText : '') || '')
                         .trim().toLowerCase().slice(0, 90);
-              const isNeg = l => /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline)(\W|$)/.test(l);
+              const isNeg = l => /(^|\W)(no|nope|disagree|i do not|i don't|i won't|decline|false)(\W|$)/.test(l) || /(disqualif|do ?not ?(select|check)|don'?t ?(select|check)|leave (this|it) (box )?unchecked|will be (removed|rejected)|not eligible|removes? you|removed from the group|ban you|get you removed|reject your request)/.test(l);
               let n = 0;
               [...dlg.querySelectorAll(SEL)].forEach(el => {
                 if (isOn(el) || isNeg(labOf(el))) return;
@@ -3903,7 +3930,7 @@ async def playwright_main(config):
                     None, get_targets_for_area, area, _same_state, _inc_counties, _mode)
                 random.shuffle(targets)
                 _st = _area_state_code(area)
-                _radius_mi = 60 if (_mode or "").lower() == "duct" else 40
+                _radius_mi = _radius_for(_mode)
                 # Sach likho: agar radius mein parosi states bhi shamil hain
                 # to unke naam dikhao, "DC only" jaisa jhoot mat bolo.
                 _sts = states_in_targets(targets)

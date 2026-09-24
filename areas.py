@@ -111,9 +111,53 @@ DUCT_AREAS = [
 AREAS = CAR_AREAS
 
 # mode string -> list
-# GARAGE — sirf ADMIN key par. Areas Muzammil baad mein denge.
+# GARAGE — sirf ADMIN key par.
 GARAGE_AREAS = [
-    # yahan garage door / garage business ke areas aayenge
+    # California
+    "Los Angeles CA", "San Jose CA", "San Francisco CA", "Sacramento CA", "San Diego CA",
+    # Colorado
+    "Denver CO", "Colorado Springs CO",
+    # Illinois
+    "Chicago IL",
+    # Washington
+    "Seattle WA",
+    # Oregon
+    "Portland OR",
+    # Tennessee
+    "Nashville TN",
+    # Minnesota
+    "Minneapolis MN",
+    # Texas
+    "San Antonio TX", "Dallas TX", "Houston TX", "Austin TX",
+    # Indiana
+    "Indianapolis IN",
+    # North Carolina
+    "Charlotte NC", "Raleigh NC",
+    # Massachusetts
+    "Boston MA",
+    # Connecticut
+    "New Haven CT",
+    # Pennsylvania
+    "Philadelphia PA",
+    # New Jersey (poora state)
+    "New Jersey",
+    # Utah
+    "Salt Lake City UT",
+    # Georgia
+    "Atlanta GA",
+    # Ohio
+    "Cleveland OH",
+    # Kansas / Missouri
+    "Kansas City MO", "St Louis MO",
+    # Arizona
+    "Phoenix AZ",
+    # Florida
+    "Miami FL", "Jacksonville FL", "Tampa FL", "Sarasota FL", "Naples FL",
+    "Fort Lauderdale FL", "Orlando FL", "Fort Myers FL",
+    # Oklahoma
+    "Oklahoma City OK",
+    # Virginia
+    "Virginia Beach VA",
 ]
 
 AREA_LISTS = {"car": CAR_AREAS, "duct": DUCT_AREAS, "garage": GARAGE_AREAS}
