@@ -4569,6 +4569,276 @@ def run_autopost(config):
         send_ui("autopost_done")
 
 
+
+# ══════════════════════════════════════════════════════════════════════
+# AUTO-COMMENT on APPROVED posts  (admin feature)
+#
+# Flow: bot auto-post kar chuka hota hai -> woh posts admin approval par
+# pending jaate hain -> ye mode ON karne par bot khula rehta hai aur HAR
+# 15 MIN notifications dekhta hai. Jahan "admin approved your post/photo"
+# aata hai, us post par employee ka TEMPLATE comment daal deta hai. Phir
+# verify (page check, phir AI) ke comment gaya ya pending/block. Pending/
+# block par Discord alert + screenshot.
+# ══════════════════════════════════════════════════════════════════════
+
+COMMENTED_FILE = f"commented_posts{SUFFIX}.txt"
+AUTOCOMMENT_INTERVAL = 15 * 60      # har 15 min notifications check
+
+# "approved your post/photo" wale notification patterns (English)
+_APPROVAL_PATTERNS = [
+    "approved your post", "approved your photo", "approved the post",
+    "approved your request to post", "your post was approved",
+    "your post has been approved", "your photo was approved",
+    "post you shared", "post is now published", "approved your contribution",
+]
+
+
+def _load_commented() -> set:
+    try:
+        return set(x.strip() for x in open(COMMENTED_FILE, encoding="utf-8") if x.strip())
+    except Exception:
+        return set()
+
+
+def _mark_commented(url: str):
+    try:
+        with open(COMMENTED_FILE, "a", encoding="utf-8") as f:
+            f.write(url + "\n")
+    except Exception:
+        pass
+
+
+def _comment_template(config) -> str:
+    """Template comment: config -> comment_template.txt -> khali."""
+    t = (config.get("comment_template") or "").strip()
+    if t:
+        return t
+    try:
+        p = os.path.join(APP_DIR, "comment_template.txt")
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def _scan_approval_notifications(page):
+    """Notifications page se UNREAD 'approved your post/photo' wale nikaalo.
+    Return: list of (text, href) — href us approved post/group ka link."""
+    out = []
+    try:
+        await _goto_retry(page, "https://www.facebook.com/notifications",
+                          timeout=20000, tries=2)
+        await sleep(rand_delay(2, 3.5))
+        await dismiss_popups(page)
+    except Exception:
+        return out
+    try:
+        items = await page.evaluate(r"""
+            () => {
+              const res = [];
+              const rows = document.querySelectorAll('[role="listitem"], [role="article"] a[href], div[aria-label] a[href*="/groups/"]');
+              const seen = new Set();
+              document.querySelectorAll('a[role="link"][href]').forEach(a => {
+                const li = a.closest('[role="listitem"]') || a.parentElement;
+                if (!li) return;
+                const t = (li.innerText || a.innerText || '').trim();
+                if (!t || t.length > 300) return;
+                let href = a.href.split('?')[0];
+                if (seen.has(t)) return;
+                // unread ka andaza: bold / blue dot (FB markup badalta hai,
+                // isliye text-match par bharosa; dedup file duplicate rokti hai)
+                res.push({ text: t, href: href });
+                seen.add(t);
+              });
+              return res.slice(0, 60);
+            }
+        """)
+    except Exception:
+        items = []
+    for it in items or []:
+        t = (it.get("text") or "").lower()
+        if any(p in t for p in _APPROVAL_PATTERNS):
+            out.append((it.get("text", "")[:160], it.get("href", "")))
+    return out
+
+
+async def _find_comment_box(page):
+    """Post ka COMMENT textbox dhoondo (composer NAHI)."""
+    sels = [
+        'div[role="textbox"][contenteditable="true"][aria-label*="omment" i]',
+        'form div[role="textbox"][contenteditable="true"]',
+        'div[aria-label*="Write a comment" i][contenteditable="true"]',
+        'div[role="textbox"][contenteditable="true"][aria-label*="reply" i]',
+    ]
+    for sel in sels:
+        try:
+            n = await page.locator(sel).count()
+        except Exception:
+            n = 0
+        for i in range(min(n, 6)):
+            b = page.locator(sel).nth(i)
+            try:
+                if await b.is_visible():
+                    return b
+            except Exception:
+                continue
+    return None
+
+
+async def _verify_comment(page, message: str) -> str:
+    """Comment gaya ya nahi. Return: 'posted' | 'pending' | 'unknown'.
+    Pehle page se dekho; saaf na ho to Gemini AI se (agar keys hon)."""
+    try:
+        body = (await page.inner_text("body"))[:6000]
+    except Exception:
+        body = ""
+    low = body.lower()
+    # pending / hold signals
+    if any(k in low for k in ("pending approval", "waiting for approval",
+                              "will be visible once", "sent for review",
+                              "your comment is pending", "awaiting approval")):
+        return "pending"
+    # comment text page par dikh raha? (pehle ~40 chars match)
+    frag = (message or "").strip()[:40].lower()
+    if frag and frag in low:
+        return "posted"
+    # AI fallback
+    try:
+        if GEMINI_KEYS:
+            q = ("A Facebook comment was just submitted. From this page text, did the "
+                 "comment POST successfully, is it PENDING admin approval, or UNKNOWN? "
+                 "Reply with one word: posted / pending / unknown.\n\nPAGE:\n" + body[:1500])
+            ans = (await gemini_answer(q) or "").strip().lower()
+            for w in ("posted", "pending", "unknown"):
+                if w in ans:
+                    return w
+    except Exception:
+        pass
+    return "unknown"
+
+
+async def _comment_on_post(page, url, message, config):
+    """Ek approved post kholo, template comment daalo, verify karo.
+    Return status string."""
+    try:
+        await _goto_retry(page, url, timeout=20000, tries=2)
+        await sleep(rand_delay(2, 3.5))
+        await dismiss_popups(page)
+        await _dismiss_group_gates(page)
+    except Exception:
+        return "error"
+
+    # account block guard (account bachao)
+    try:
+        blk = await check_account_block(page)
+        if blk:
+            blk = await confirm_account_block(page, blk)
+        if blk:
+            await alert_ss(page, config, f"ACCOUNT BLOCK during auto-comment ({blk})",
+                           "Bot stopped auto-comment to protect the account.")
+            config["_end_reason"] = "account_blocked"
+            stop_event.set()
+            return "blocked"
+    except Exception:
+        pass
+
+    box = await _find_comment_box(page)
+    if not box:
+        return "nobox"
+    try:
+        await box.click()
+        await sleep(rand_delay(0.6, 1.2))
+        await box.type(message, delay=25)
+        await sleep(rand_delay(0.6, 1.2))
+        await page.keyboard.press("Enter")
+        await sleep(rand_delay(2.5, 4))
+    except Exception:
+        return "error"
+
+    status = await _verify_comment(page, message)
+    if status == "pending":
+        try:
+            await alert_ss(page, config, "Comment PENDING admin approval",
+                           f"Comment submitted but held for review.\npost: {url[:150]}")
+        except Exception:
+            pass
+    return status
+
+
+async def _autocomment_main(config):
+    """ON rehne wala loop: har 15 min approvals check + comment."""
+    template = _comment_template(config)
+    if not template:
+        send_ui("log", text="⚠️ Auto-comment: koi template message nahi mila "
+                            "(comment_template.txt khali). Ruk gaye.")
+        send_ui("autocomment_done")
+        return
+
+    global GEMINI_KEYS
+    GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
+    done = _load_commented()
+    send_ui("log", text="\U0001f4ac Auto-comment ON — har 15 min approvals check honge. "
+                        "Bot chalta rahega (STOP se rukega).")
+
+    async with async_playwright() as p:
+        ctx = await _launch_ctx(p, headless=False,
+                                viewport={"width": 1280, "height": 800})
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        try:
+            await _goto_retry(page, "https://www.facebook.com", timeout=20000, tries=2)
+        except Exception:
+            pass
+
+        while not stop_event.is_set():
+            try:
+                appr = await _scan_approval_notifications(page)
+                new = [(t, h) for (t, h) in appr if h and h not in done]
+                if new:
+                    send_ui("log", text=f"✅ {len(new)} approved post(s) mile — comment kar rahe hain…")
+                for text, href in new:
+                    if stop_event.is_set():
+                        break
+                    st = await _comment_on_post(page, href, template, config)
+                    if st == "blocked":
+                        break
+                    if st in ("posted", "pending"):
+                        done.add(href); _mark_commented(href)
+                    icon = {"posted": "✅ commented", "pending": "⏳ pending approval",
+                            "nobox": "⚠️ no comment box", "error": "⚠️ error",
+                            "unknown": "❓ sent (unverified)"}.get(st, st)
+                    send_ui("log", text=f"   {icon}: {text[:70]}")
+                    _a = config.get("_activity")
+                    if _a and st in ("posted", "pending"):
+                        try: _a.record_join() if False else None
+                        except Exception: pass
+                    await sleep(rand_delay(8, 16))   # comments ke beech gap
+                if not new:
+                    send_ui("log", text="   ℹ️ Koi nayi approval nahi. 15 min baad phir dekhenge.")
+            except Exception as e:
+                log_error("autocomment loop", e)
+
+            # 15 min intezaar (stop par foran nikal jao)
+            _end = time.time() + AUTOCOMMENT_INTERVAL
+            while time.time() < _end and not stop_event.is_set():
+                await sleep(3)
+                _bump_activity()
+
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+    send_ui("autocomment_done")
+
+
+def run_autocomment(config):
+    try:
+        asyncio.run(_autocomment_main(config))
+    except Exception as e:
+        send_ui("log", text=f"auto-comment error: {str(e)[:100]}")
+        send_ui("autocomment_done")
+
+
 # ── Pre-flight check ─────────────────────────────────────────
 async def _preflight_test_join(page, config) -> tuple:
     """ASAL ek group dhoond ke join try karo — agar account pe koi

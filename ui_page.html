@@ -270,6 +270,8 @@
         <textarea id="kw" class="inp mono" spellcheck="false"></textarea>
         <label class="lbl">Don't-join keywords · one per line</label>
         <textarea id="block" class="inp mono" spellcheck="false"></textarea>
+        <label class="lbl">💬 Auto-comment template · approve hone par ye comment jayega</label>
+        <textarea id="ctmpl" class="inp" spellcheck="false" placeholder="e.g. Great group! We offer professional car detailing & duct cleaning in your area — DM us."></textarea>
       </div>
 
       <div class="panel">
@@ -278,6 +280,7 @@
           <button class="obtn" id="btnLogin"><span class="bi">📘</span> Login to Facebook</button>
           <button class="obtn" id="btnLogout"><span class="bi">🚪</span> Log out of Facebook</button>
           <button class="obtn" id="btnAutopost"><span class="bi">📢</span> Auto Post on Page</button>
+          <button class="obtn" id="btnAutocomment"><span class="bi">💬</span> Auto-Comment on Approvals</button>
           <button class="obtn" id="btnPreflight"><span class="bi">🔎</span> Pre-flight Check</button>
           <button class="start" id="btnStart">▶  START BOT</button>
         </div>
@@ -403,6 +406,7 @@ function applySettings(s){
   $("#safeChk").classList.toggle("on",s.safe_mode); applySafe();
   $("#kw").value=(s.search_keywords||[]).join("\\n");
   $("#block").value=(s.block_keywords||[]).join("\\n");
+  $("#ctmpl").value=s.comment_template||"";
   $("#limVal").textContent=s.daily_limit; $("#tLimit").textContent=s.daily_limit;
 }
 function buildAreas(list,sel){
@@ -435,6 +439,11 @@ $("#btnStart").onclick=async()=>{
 $("#btnLogin").onclick=async()=>{const r=await api("/api/login",{});toast(r.msg||"Opening browser…");};
 $("#btnLogout").onclick=async()=>{const r=await api("/api/logout",{});toast(r.msg||"Logging out…");};
 $("#btnAutopost").onclick=async()=>{const r=await api("/api/autopost",{});toast(r.msg||"…");};
+$("#btnAutocomment").onclick=async()=>{
+  if(!window._isAdmin){toast("🔒 Only for Admins");return;}
+  const r=await api("/api/autocomment",{comment_template:$("#ctmpl").value});
+  toast(r.error||r.msg||"…");
+};
 $("#btnPreflight").onclick=async()=>{const r=await api("/api/preflight",collect());toast(r.msg||"Checking…");};
 $("#btnClear").onclick=()=>{$("#logBody").innerHTML="";};
 $("#secOk").onclick=()=>$("#secVeil").classList.remove("show");
@@ -488,7 +497,7 @@ async function poll(){
     // buttons
     $("#btnStart").textContent=s.running?"⏹  STOP BOT":"▶  START BOT";
     $("#btnStart").classList.toggle("stop",s.running);
-    ["btnLogin","btnLogout","btnAutopost","btnPreflight"].forEach(id=>$("#"+id).disabled=s.running||s.busy);
+    ["btnLogin","btnLogout","btnAutopost","btnAutocomment","btnPreflight"].forEach(id=>$("#"+id).disabled=s.running||s.busy);
     // footer
     $("#foot").classList.toggle("run",s.running);
     $("#fStatus").textContent=s.running?"Bot is running":(s.busy?"Working…":"Idle");

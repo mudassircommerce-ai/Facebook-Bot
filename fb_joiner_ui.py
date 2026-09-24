@@ -111,6 +111,9 @@ def _drain_loop():
                 with _LK: STATE["skipped"] += 1
             elif t in ("login_done", "logout_done", "preflight_done", "autopost_done"):
                 with _LK: STATE["busy"] = False
+            elif t == "autocomment_done":
+                with _LK:
+                    STATE["running"] = False; STATE["run_start"] = None; STATE["search"] = ""
             elif t == "stopped":
                 with _LK:
                     STATE["running"] = False; STATE["run_start"] = None
@@ -163,8 +166,19 @@ def _current_settings():
         "safe_mode": bool(s.get("safe_mode", False)),
         "search_keywords": s.get("search_keywords") or B.default_search_keyword_lines(),
         "block_keywords": s.get("block_keywords") or B.resolve_block_keywords(),
+        "comment_template": s.get("comment_template") or _read_comment_template(),
         "daily_limit": B.DAILY_LIMIT,
     }
+
+
+def _read_comment_template():
+    try:
+        p = os.path.join(HERE, "comment_template.txt")
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _build_config(d, info):
@@ -290,6 +304,8 @@ class H(BaseHTTPRequestHandler):
             if not (info.get("ok") and info.get("admin")):
                 self._json({"msg": "🔒 Auto-post is admin-only."}); return
             self._json({"msg": "Auto-post: use the desktop app for now."})
+        elif u.path == "/api/autocomment":
+            self._json(self._start_autocomment(d))
         elif u.path == "/api/activate":
             self._json(self._activate(d))
         elif u.path == "/api/save":
@@ -320,6 +336,33 @@ class H(BaseHTTPRequestHandler):
                          joined_run=0, skipped=0, failed=0, search="", area="")
         threading.Thread(target=B.run_playwright, args=(cfg,), daemon=True).start()
         return {"ok": True}
+
+    def _start_autocomment(self, d):
+        info = _lic_info()
+        if not info.get("ok"):
+            return {"error": info.get("error") or "License required"}
+        if not info.get("admin"):
+            return {"error": "🔒 Auto-comment is admin-only."}
+        tmpl = (d.get("comment_template") or "").strip()
+        if not tmpl:
+            return {"error": "Comment template khali hai — pehle message likhein."}
+        # template yaad rakho (file + settings)
+        try:
+            with open(os.path.join(HERE, "comment_template.txt"), "w", encoding="utf-8") as f:
+                f.write(tmpl)
+            B.update_settings({"comment_template": tmpl})
+        except Exception:
+            pass
+        cfg = {"employee": info.get("employee", "") or "unknown",
+               "license_key": lic.load_active_key(),
+               "gemini_keys": B.resolve_gemini_keys(""),
+               "comment_template": tmpl}
+        B.stop_event.clear(); B.user_stop_event.clear()
+        with _LK:
+            STATE.update(running=True, run_start=time.time(),
+                         area="💬 Auto-comment mode — watching approvals", search="")
+        threading.Thread(target=B.run_autocomment, args=(cfg,), daemon=True).start()
+        return {"ok": True, "msg": "Auto-comment ON — har 15 min approvals check honge."}
 
     def _simple(self, fn, msg):
         with _LK: STATE["busy"] = True
@@ -370,21 +413,61 @@ class H(BaseHTTPRequestHandler):
         return out
 
 
-def _launch_window(url):
-    """Playwright ka installed Chromium 'app mode' mein — native window jaisa."""
+def _chrome_exe():
     exes = glob.glob(os.path.join(
         os.environ.get("LOCALAPPDATA", ""),
         "ms-playwright", "chromium-*", "chrome-win*", "chrome.exe"))
-    prof = os.path.join(HERE, f".ui_win{B.SUFFIX}")
-    args = ["--app=" + url, "--user-data-dir=" + prof,
-            "--window-size=1330,880", "--no-first-run", "--no-default-browser-check"]
     if exes:
-        return subprocess.Popen([exes[0]] + args)
-    # fallback: system Chrome / default browser
+        return exes[0]
     for c in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
               r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"):
         if os.path.exists(c):
-            return subprocess.Popen([c] + args)
+            return c
+    return ""
+
+
+def _launch_window(url):
+    """Installed Chromium ko 'app window' bana kar UI kholo.
+
+    Server par load zyada hota hai + pichli koshishon se profile lock reh
+    jata tha, jis se window band ho jati thi. Isliye: har baar stale lock
+    saaf karo, server-safe flags do, aur agar window foran band ho jaye
+    to ek dafa dobara (fresh profile) koshish, warna default browser."""
+    exe = _chrome_exe()
+    prof = os.path.join(HERE, f".ui_win{B.SUFFIX}")
+
+    def _clear_lock(p):
+        for lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                os.remove(os.path.join(p, lk))
+            except Exception:
+                pass
+
+    def _spawn(p):
+        _clear_lock(p)
+        args = [exe, "--app=" + url, "--user-data-dir=" + p,
+                "--window-size=1330,880", "--no-first-run",
+                "--no-default-browser-check", "--disable-gpu",
+                "--disable-features=Translate,AutomationControlled",
+                "--no-sandbox"]
+        return subprocess.Popen(args)
+
+    if exe:
+        try:
+            win = _spawn(prof)
+            time.sleep(4)
+            if win.poll() is None:          # zinda -> theek
+                return win
+            # foran band ho gaya -> fresh profile se dobara
+            prof2 = prof + "_" + str(int(time.time()))
+            win = _spawn(prof2)
+            time.sleep(3)
+            if win.poll() is None:
+                return win
+        except Exception:
+            pass
+
+    # aakhri fallback: default browser mein khol do
     import webbrowser
     webbrowser.open(url)
     return None
