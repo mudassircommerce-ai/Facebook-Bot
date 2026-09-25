@@ -88,6 +88,26 @@ def _bump_activity():
     global _LAST_ACTIVITY
     _LAST_ACTIVITY = time.monotonic()
 
+# Browser / page hi mar gaya (crash, OOM, window band, connection toot gaya)?
+# In errors ko NIGALNA nahi hai — inhe upar bhejo taake run_playwright fresh
+# browser se restart kare. Warna dead browser ke saath bot chalta rehta hai
+# (har search "skip", 0 join) aur kabhi rukta/restart hota hi nahi.
+_BROWSER_DEAD_MARKERS = (
+    "target closed", "targetclosed", "browser has been closed",
+    "page has been closed", "connection closed", "browser.newcontext",
+    "crashed", "playwright._impl", "has been closed", "websocket",
+    "econnreset", "session closed", "context or browser has been closed",
+    "target page, context or browser has been closed",
+)
+
+def _is_browser_dead(exc) -> bool:
+    """True agar exception ka matlab browser/page/context hi khatam ho gaya."""
+    try:
+        s = (str(exc) + " " + type(exc).__name__).lower()
+    except Exception:
+        return False
+    return any(k in s for k in _BROWSER_DEAD_MARKERS)
+
 # Account 1 ke liye purana default page rakha hai (backward compatible).
 # Baaki accounts (2, 3, ...) mein khali rakhte hain — har account ka apna
 # page naam UI mein zaroor type karna hoga.
@@ -3317,12 +3337,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         # NIGAL kar "skipped" mat batao. Warna dead browser ke saath 100s
         # groups chup-chaap "skip" hote rehte hain aur "Done, joined 0" aata
         # hai. Ise upar bhejo -> run_playwright fresh browser se auto-restart karega.
-        _es = (str(e) + " " + type(e).__name__).lower()
-        if any(k in _es for k in ("target closed", "targetclosed", "browser has been closed",
-                                  "page has been closed", "connection closed",
-                                  "browser.newcontext", "crashed", "playwright._impl",
-                                  "has been closed", "websocket", "econnreset",
-                                  "session closed")):
+        if _is_browser_dead(e):
             send_ui("log", text=f"🔁 Browser lost ({str(e)[:60]}) — will relaunch and continue.")
             raise
         send_ui("log", text=f"⏭️  Error: {str(e)[:80]}")
@@ -3362,6 +3377,14 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         await _goto_retry(page, url, timeout=20000, tries=2)
         await sleep(rand_delay(1.5, 2.5))
     except Exception as e:
+        # Browser hi mar gaya? -> is error ko NIGALNA mat. Warna dead browser
+        # ke saath har search "skip" hoti rehti hai, _bump_activity() upar chal
+        # ke hang-guard ka timer bhi reset karta rehta hai, aur bot 0 join ke
+        # saath hamesha "chalta" rehta hai bina restart ke. Upar bhejo ->
+        # run_playwright fresh browser se auto-restart karega.
+        if _is_browser_dead(e):
+            send_ui("log", text=f"🔁 Browser lost during search ('{query}') — relaunching.")
+            raise
         # Pehle yahan chup-chaap return ho jata tha — poora target bina
         # kisi log ke gayab. Ab kam se kam pata to chale.
         send_ui("log", text=f"   ⚠️  Search page didn't load ('{query}') — skip")
@@ -3615,6 +3638,64 @@ _STEALTH_INIT_JS = """
 """
 
 
+def _clear_profile_locks():
+    """Chrome ke singleton lock files hatao (crash ke baad reh jaate hain)."""
+    for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            os.remove(os.path.join(PW_PROFILE_DIR, _lk))
+        except Exception:
+            pass
+
+
+def _kill_stale_chrome_for_profile():
+    """Is instance ke profile se bandhe reh gaye (zombie) chrome.exe ko maar do.
+
+    'profile already in use' crash isliye aata hai ke pichhli run/crash ka
+    chrome abhi tak PW_PROFILE_DIR hold kar raha hota hai — sirf lock file
+    hatane se wo process nahi marta. Yahan command line mein EXACT
+    --user-data-dir=<PW_PROFILE_DIR> match karke sirf ISI bot ka chrome
+    maara jata hai; baaki 19 bots (alag profile dir) ko haath nahi lagta.
+    """
+    if os.name != "nt":
+        return
+    target = f"--user-data-dir={PW_PROFILE_DIR}"
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+             "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+    except Exception:
+        return
+    if not out:
+        return
+    try:
+        data = json.loads(out)
+    except Exception:
+        return
+    if isinstance(data, dict):
+        data = [data]
+    for proc in data:
+        cmd = (proc or {}).get("CommandLine") or ""
+        idx = cmd.find(target)
+        if idx == -1:
+            continue
+        # arg-boundary check: target ke foran baad space/quote/end ho — taake
+        # 'pw_profile' (inst 1) galti se 'pw_profile_9' se match na kare.
+        after = cmd[idx + len(target): idx + len(target) + 1]
+        if after not in ("", " ", '"'):
+            continue
+        pid = (proc or {}).get("ProcessId")
+        if not pid:
+            continue
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                           capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass
+
+
 async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
     """Persistent-context browser — automation/VPS fingerprint chhupa ke."""
     args = [
@@ -3640,7 +3721,27 @@ async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
     )
     if viewport is not None:
         kwargs["viewport"] = viewport
-    ctx = await p.chromium.launch_persistent_context(**kwargs)
+    # Self-heal: agar profile pehle se locked hai ('Opening in existing browser
+    # session'), to us profile ka zombie chrome maar ke + lock files hata ke
+    # retry karo. Warna restart loop bar-bar wahi crash khaata hai.
+    last_exc = None
+    for _attempt in range(3):
+        try:
+            ctx = await p.chromium.launch_persistent_context(**kwargs)
+            break
+        except Exception as e:
+            last_exc = e
+            msg = str(e).lower()
+            if ("existing browser session" in msg
+                    or "already in use" in msg
+                    or "processsingleton" in msg):
+                _kill_stale_chrome_for_profile()
+                _clear_profile_locks()
+                await asyncio.sleep(3)
+                continue
+            raise
+    else:
+        raise last_exc
     try:
         await ctx.add_init_script(_STEALTH_INIT_JS)
     except Exception:
@@ -3773,13 +3874,25 @@ async def playwright_main(config):
                     send_ui("log", text=f"⏱️ No progress for ~{_mins} min — the page looks "
                                         f"stuck. Restarting the browser now "
                                         f"(today's joins are safe, no action needed).")
-                    if act:
+                    # SCREENSHOT + wajah Discord par bhejo — pehle sirf text
+                    # jata tha, admin ko pata hi nahi chalta tha ke bot kis
+                    # page/step par atka hai. alert_ss screenshot le kar bhejta
+                    # hai (na ban sake to khud text par fall-back kar deta hai).
+                    try:
+                        _last_url = ""
                         try:
-                            act.alert(f"Bot stalled ~{_mins} min on a page — auto-restarting "
-                                      f"the browser. No action needed unless it repeats. "
-                                      f"📞 Contact {BRAND} if it keeps happening.")
+                            _last_url = page.url or ""
                         except Exception:
                             pass
+                        await alert_ss(
+                            page, config,
+                            f"BOT STUCK ~{_mins} min (no progress) — auto-restarting",
+                            f"Page looked frozen on this step for ~{_mins} min. "
+                            f"The screenshot shows where it got stuck. "
+                            f"Auto-restarting the browser; no action needed unless "
+                            f"it keeps repeating. 📞 Contact {BRAND} if it does.")
+                    except Exception:
+                        pass
                     config["_stall_restart"] = True
                     try:
                         await page.context.close()
@@ -5183,6 +5296,36 @@ def run_playwright(config):
     config["_activity"] = act
     config["_end_reason"] = "completed"
 
+    # ── STOP enforcer ─────────────────────────────────────────
+    # Bug: STOP dabane par kabhi-kabhi chromium khula reh jata tha. Bot ek
+    # daemon-thread mein chalta hai; agar coroutine kisi lambe/hung `await`
+    # (page.goto, selector wait, delay) par atka ho to stop_event turant
+    # asar nahi karta aur `ctx.close()` tak nobat hi nahi aati -> browser
+    # zinda. Hal: STOP ke baad thodi der graceful close ka mauka do, phir
+    # bhi run khatam na ho to is profile ka chromium ZABARDASTI band kar do.
+    # Chromium marte hi saare pending awaits TargetClosedError phenkte hain
+    # -> coroutine turant unblock -> thread saaf-suthra khatam.
+    _run_over = threading.Event()
+
+    def _stop_enforcer():
+        # STOP ka intezar (ya run ka khud khatam ho jana)
+        while not _run_over.is_set():
+            if user_stop_event.wait(timeout=1.0):
+                break
+        if _run_over.is_set():
+            return
+        # graceful close ke liye ~12s do
+        if _run_over.wait(timeout=12.0):
+            return
+        try:
+            send_ui("log", text="⏹️ Stopping — force-closing the browser…")
+        except Exception:
+            pass
+        _kill_stale_chrome_for_profile()
+        _clear_profile_locks()
+
+    threading.Thread(target=_stop_enforcer, daemon=True).start()
+
     # ── Auto-resume on crash ──────────────────────────────────
     # Crash / browser band ho jaye -> khud restart, aaj ke joins wahin se
     # continue (joined_today persistent). STOP dabaya / terminal reason
@@ -5371,6 +5514,16 @@ def run_playwright(config):
                 _a._push_text(f"⏹️ BOT STOPPED — {_msg}")
             else:
                 _a.alert(f"■ BOT STOPPED — {_RMAP.get(_reason, _reason)}  ·  Contact {BRAND}")
+    except Exception:
+        pass
+
+    # Run khatam — enforcer ko batao (taake wo bekaar mein kill na kare) aur
+    # is profile ka koi orphan chromium reh gaya ho to guaranteed band karo
+    # (graceful ctx.close chuk gaya / crash ho gaya to bhi browser na bache).
+    _run_over.set()
+    try:
+        _kill_stale_chrome_for_profile()
+        _clear_profile_locks()
     except Exception:
         pass
 

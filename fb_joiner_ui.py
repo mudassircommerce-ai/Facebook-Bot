@@ -37,7 +37,7 @@ PAGE = os.path.join(HERE, "ui_page.html")
 _LK = threading.Lock()
 STATE = {
     "running": False, "busy": False,
-    "today": 0, "skipped": 0, "joined_run": 0, "failed": 0,
+    "today": 0, "skipped": 0, "joined_run": 0, "failed": 0, "limit": 200,
     "area": "", "search": "", "run_start": None,
 }
 _ROWS = []          # {id,time,status,msg,tag}
@@ -159,6 +159,27 @@ def _lic_info():
     return info
 
 
+def _clean_kw_list(v):
+    """search/block keywords ko saaf, single-line items ki list bana do.
+
+    Purani UI (ui_page.html) galti se list ko literal '\\n' (backslash-n) se
+    jod deti thi — asli newline ke bajaye. Us se saare keywords EK line mein
+    mash ho jate the aur bot ek hi bekaar query banata tha (koi result -> koi
+    join nahi). Frontend to theek ho gaya, lekin jin bots ne us daur mein
+    settings SAVE kar li, unki bot_settings.json mein wo mashed string abhi
+    bhi mojood hai. Yahan real newline, \\r, aur literal '\\n' — teeno par tod
+    kar us purane kachre ko bhi khud theek kar deta hai."""
+    items = [v] if isinstance(v, str) else list(v or [])
+    out, seen = [], set()
+    for it in items:
+        for part in re.split(r"\\n|\r\n|\r|\n", str(it)):
+            p = part.strip()
+            if p and not p.startswith("#") and p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
+
+
 def _current_settings():
     s = B.load_settings()
     suf = B.SUFFIX
@@ -177,10 +198,10 @@ def _current_settings():
         "same_state_only": bool(s.get("same_state_only", True)),
         "include_counties": bool(s.get("include_counties", True)),
         "safe_mode": bool(s.get("safe_mode", False)),
-        "search_keywords": s.get("search_keywords") or B.default_search_keyword_lines(),
-        "block_keywords": s.get("block_keywords") or B.resolve_block_keywords(),
+        "search_keywords": _clean_kw_list(s.get("search_keywords")) or B.default_search_keyword_lines(),
+        "block_keywords": _clean_kw_list(s.get("block_keywords")) or B.resolve_block_keywords(),
         "comment_template": s.get("comment_template") or _read_comment_template(),
-        "daily_limit": B.DAILY_LIMIT,
+        "daily_limit": int(s.get("daily_limit", B.DAILY_LIMIT) or B.DAILY_LIMIT),
     }
 
 
@@ -195,18 +216,25 @@ def _read_comment_template():
 
 
 def _build_config(d, info):
-    kw_lines = [x for x in (d.get("search_keywords", "") or "").splitlines() if x.strip()]
-    blk = [x.strip() for x in (d.get("block_keywords", "") or "").splitlines() if x.strip()]
+    kw_lines = _clean_kw_list(d.get("search_keywords"))
+    blk = _clean_kw_list(d.get("block_keywords"))
     pub = max(0, min(100, int(d.get("public_pct", 30) or 0)))
     mode = (d.get("business_mode") or "car").lower()
     safe = bool(d.get("safe_mode"))
     city = d.get("city") or B.ALL_AREAS_LABEL
     if safe:
         mode = "duct"; pub = 0; city = B.ALL_AREAS_LABEL
+    # Daily limit: ADMIN apni marzi ka set kar sakta hai; employee LOCKED 200.
+    lim = B.DAILY_LIMIT
+    if info.get("admin"):
+        try:
+            lim = max(1, int(d.get("daily_limit") or B.DAILY_LIMIT))
+        except Exception:
+            lim = B.DAILY_LIMIT
     cfg = {
         "city": city, "page_name": B.DEFAULT_PAGE_NAME,
         "page_link": (d.get("page_link") or "").strip(),
-        "daily_limit": B.DAILY_LIMIT,
+        "daily_limit": lim,
         "delay_min": int(d.get("delay_min", 30) or 30),
         "delay_max": int(d.get("delay_max", 60) or 60),
         "employee": info.get("employee", "") or "unknown",
@@ -244,8 +272,8 @@ def _persist(d):
             "same_state_only": bool(d.get("same_state_only", True)),
             "include_counties": bool(d.get("include_counties", True)),
             "safe_mode": bool(d.get("safe_mode")),
-            "block_keywords": [x.strip() for x in (d.get("block_keywords") or "").splitlines() if x.strip()],
-            "search_keywords": [x for x in (d.get("search_keywords") or "").splitlines() if x.strip()],
+            "block_keywords": _clean_kw_list(d.get("block_keywords")),
+            "search_keywords": _clean_kw_list(d.get("search_keywords")),
         })
     except Exception:
         pass
@@ -344,8 +372,11 @@ class H(BaseHTTPRequestHandler):
             B._GEMINI_DOWN.clear()
         except Exception:
             pass
+        if info.get("admin"):
+            try: B.update_settings({"daily_limit": cfg["daily_limit"]})
+            except Exception: pass
         with _LK:
-            STATE.update(running=True, run_start=time.time(),
+            STATE.update(running=True, run_start=time.time(), limit=cfg["daily_limit"],
                          joined_run=0, skipped=0, failed=0, search="", area="")
         threading.Thread(target=B.run_playwright, args=(cfg,), daemon=True).start()
         return {"ok": True}
@@ -396,7 +427,7 @@ class H(BaseHTTPRequestHandler):
     def _state(self, since):
         info = _lic_info()
         with _LK:
-            lim = B.DAILY_LIMIT
+            lim = STATE.get("limit") or B.DAILY_LIMIT
             pct = min(100, round(STATE["today"] / lim * 100)) if lim else 0
             rows = [r for r in _ROWS if r["id"] > since][-120:]
             rs = STATE["run_start"]

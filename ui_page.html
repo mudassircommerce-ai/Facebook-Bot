@@ -247,7 +247,9 @@
       <div class="panel">
         <div class="ghd"><div class="gi">⚙</div><span>Limits &amp; Speed</span></div>
         <label class="lbl">Daily Join Limit</label>
-        <div class="inp lock"><span id="limVal">200</span><span class="lktag">🔒 set by admin</span></div>
+        <div class="inp lock" id="limLocked"><span id="limVal">200</span><span class="lktag">🔒 set by admin</span></div>
+        <input id="limInput" class="inp" value="200" style="display:none;">
+        <div class="mix" id="limNote" style="display:none;">Admin — apni marzi ka limit set karein</div>
         <div class="row2" style="margin-top:12px;">
           <div><label class="lbl">Min public members</label><input id="minpub" class="inp" value="1000"></div>
           <div><label class="lbl">Min private members</label><input id="minpriv" class="inp" value="1000"></div>
@@ -390,6 +392,7 @@ function collect(){return{
   include_counties:$("#f_county").classList.contains("on"),
   safe_mode:$("#safeChk").classList.contains("on"),
   search_keywords:$("#kw").value, block_keywords:$("#block").value,
+  daily_limit:(+$("#limInput").value||0),
 };}
 
 function applySettings(s){
@@ -404,10 +407,11 @@ function applySettings(s){
   $("#f_state").classList.toggle("on",s.same_state_only);
   $("#f_county").classList.toggle("on",s.include_counties);
   $("#safeChk").classList.toggle("on",s.safe_mode); applySafe();
-  $("#kw").value=(s.search_keywords||[]).join("\\n");
-  $("#block").value=(s.block_keywords||[]).join("\\n");
+  $("#kw").value=(s.search_keywords||[]).join("\n");
+  $("#block").value=(s.block_keywords||[]).join("\n");
   $("#ctmpl").value=s.comment_template||"";
   $("#limVal").textContent=s.daily_limit; $("#tLimit").textContent=s.daily_limit;
+  $("#limInput").value=s.daily_limit;
 }
 function buildAreas(list,sel){
   const a=$("#area"); a.innerHTML="";
@@ -479,6 +483,10 @@ async function poll(){
       $("#secName").textContent=s.lic.employee||"this device";
       $("#secMid").textContent=s.lic.mid||"—";
       window._isAdmin = !!s.lic.admin;   // Garage sirf admin chala sakta hai
+      // Admin -> daily limit editable; employee -> 200 locked
+      $("#limLocked").style.display = s.lic.admin ? "none" : "";
+      $("#limInput").style.display  = s.lic.admin ? "" : "none";
+      $("#limNote").style.display   = s.lic.admin ? "" : "none";
     }
     if(s.settings)applySettings(s.settings);
     // stats
