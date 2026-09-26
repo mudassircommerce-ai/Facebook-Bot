@@ -1,5 +1,5 @@
 {
- "version": 123,
+ "version": 127,
  "files": {
   "EMPLOYEE_SETUP.txt": "8254dab0abbdb81b39d034ca92ab1b79b6b7a4af310882f9220764281ea4ece6",
   "README.txt": "c25826fc4b653328cc41d957f270720c382b23ed0934444e0353bd9ab9b98947",
@@ -24,18 +24,19 @@
   "START_8.bat": "fac7c75336fb5d2ce042817db097fc0b950a1a285250e2c6e0203aef2ed1f55b",
   "START_9.bat": "bd551ef1291b351f2b79a79cd8e8c407b9c5df28a150b9d3ce5d7cc5bca083d9",
   "activity.py": "1c7c43d670844ac4b3d922e89ee27126a6c99c1c1b41274e83e7cb863aad55f5",
-  "areas.py": "ea6e5f4fed31f0f2ebb5c3b27b2f28d9e72ffe9b3c06cb1b466c7b8bf38d1d03",
-  "areas_cache.json": "d94e1f23c1648b786d8e9b9baf93acbf96c834303608180820bee28555fec355",
-  "areas_cache_duct.json": "293c59ab8ee6b623e63e9ba1dd2b19a5c3911f29f1144d939da3391ab609ded6",
+  "areas.py": "344e976a157dee715902beeaf8106ccd5bef38fb199767599c25e15640c060b9",
+  "areas_cache.json": "8e02848ea3d8c2c8a4c4fa5cce5eee7166730ebab5bde20101aa9f139f37c97a",
+  "areas_cache_duct.json": "97e148c70dfc32a6218c889d3f2339fcb383b052628c6e22f46516d1a0d99800",
+  "areas_cache_garage.json": "ae37241d599e6dd158d031ce3483abcc452ac6dfd660d2260ccbbf63745d6d0d",
   "block_keywords.txt": "1752f090b4ab002e9c1207b7446e2098543b4d0b1af79e14c9d7c0e6f858bc41",
-  "duct_test_areas.json": "c2940baa47ac8c24ae7bc41bd491853502a92354d365a2c42a28bad8982d6a2c",
-  "fb_joiner.py": "222fe31e1f4e5d88c11716c4de2e6bc10d79dc9f1c13305b7f1772ca01f4efc7",
+  "duct_test_areas.json": "cfbf5f86e663bbb623455954648db1c03a3fa53fdec4233de0510212cca0d3a3",
+  "fb_joiner.py": "f9564bac5d5bf92b0578744acc770fbfeba40e217823e22755edd72b877ff3b3",
   "fb_joiner_ui.py": "36cb713ca986720bd34c394e4157ab5e3f9abee3e1013fe939552e9527b96439",
   "keywords.txt": "1ac31a71d0d2f3efb0044876e340de14fc4277f00331673243fb5288fad04fed",
   "license_common.py": "ef2806dfb7b3887e8f079833ae7b0b0c8ab85aeaacdb940f3ff5ab82a42f9700",
   "logout_account.py": "5570e30a566c5358dfa7233236f5ecfeeaacb94f4611850ee4d88b87a6af76e3",
   "ui_page.html": "b35d0427d60eab9379e6fb6f0e1737d813c6f94e7ca980443de69b2112f20f92",
-  "updater.py": "8b8be2e45e3f10dcad87f4f1d59a0f1be18ddc9174854c46a14e64c1f97ead10"
+  "updater.py": "31430d6e46ae6dfad106fbcd64c89ec1150b1e9e4377d03fbf2de384c6caaf02"
  },
- "sig": "LcyaSCLLmscIDvSIZQPbQ--306t3rekPwZ3UsH03EHxeqONxXJnF6-0-QLzNLEJoBS3BHOwiBU-tzLECnYGDDq_WtMUz7y1_dYdtEd1IE0Yt2CSnUVrMr4Iw4cMfSfhi9xt_79fiz5BmOrWPMOJaym6oGrTZq2JbT_V1gzpVwS-BcrgdPgzoVUIpsZ_fFiPZPk81MzzzKsHzp0p2hJWB8ql7INtNMRkqqnqDyblrkUEABMwIUEhhVsrk-en33dma2X0E5rAd5wRDzgk4LugXdNMJ7cJSfSyVUcEmahCARPumM13-BTqBZi6uiJcu3tbWp6fYlwM4PSxPs88OCCwT8w"
+ "sig": "LprbWx8MrXbcl6FHEx6I8WAHLpHtOw1u-UwxbavvGYpOtVzVcTbFOKmmEGsqC8Gd9U4WyRFtAII6zIvIL5w4Rfo2ABdassa2cLFjR9RC8sjkywTAjbvQjK88L3AR8twNByEUGL4-BnNyniMLZfUsqeY4HUCjZMlKf1Cv-I81In1huy8CudSCF5lda_0qz50dtwEdYM8Vk_Yty1unpDkDd-te7qEHgeQAREQU1QL-qKFViuVKVOwEKKY04sDmEnP4WFkfg2fiZH1VXS6-PHahQwIbKzYFMseR6EzvTXZRTyp62joC772TFo6mzdA-b-Hl2HO2ey9LrR3n5Si74cThlw"
 }

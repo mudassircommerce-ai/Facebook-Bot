@@ -1038,6 +1038,12 @@ SEARCH_TEMPLATES = [
 
 LOG_FILE         = f"groups_log{SUFFIX}.csv"
 JOINED_FILE      = f"joined_groups{SUFFIX}.txt"
+# Permanently-skippable groups (page-not-allowed, members-can't-post, blocked
+# keyword, wrong-state, non-USA, non-English). Inhe yaad rakhte hain taake har
+# round/run mein dobara na khulein — warna bot ~20s per group inhi par zaya
+# karta reh jata tha (4 ghante mein 3000 skip, 10 join wala masla). joined_groups
+# se ALAG file — taake "asli joined" list saaf rahe.
+SKIP_FILE        = f"skipped_perm{SUFFIX}.txt"
 TOTAL_FILE       = f"total_count{SUFFIX}.txt"
 TOTAL_SKIP_FILE  = f"total_skipped_count{SUFFIX}.txt"
 
@@ -1061,6 +1067,22 @@ def load_joined():
 def save_joined(url):
     with open(JOINED_FILE, "a") as f:
         f.write(url + "\n")
+
+def load_skipped():
+    """Permanently-skipped group URLs (dobara kabhi na kholne ke liye)."""
+    if not Path(SKIP_FILE).exists():
+        return set()
+    try:
+        return set(open(SKIP_FILE).read().splitlines())
+    except Exception:
+        return set()
+
+def save_skipped(url):
+    try:
+        with open(SKIP_FILE, "a") as f:
+            f.write(url + "\n")
+    except Exception:
+        pass
 
 def load_total():
     if not Path(TOTAL_FILE).exists():
@@ -1097,9 +1119,12 @@ def load_area_cache(fname: str = None) -> dict:
     except Exception:
         return {}
 
-# CAR areas -> 40-mile cache ;  DUCT areas -> 60-mile cache (alag file)
-_AREA_CACHE      = load_area_cache()
-_AREA_CACHE_DUCT = load_area_cache(os.path.join(APP_DIR, "areas_cache_duct.json"))
+# CAR -> 40mi ; DUCT -> 60mi ; GARAGE -> 50mi (har mode ka apna cache).
+# Ab ye driving-distance (road) se bane cache hain (ORS Matrix), pehle straight-
+# line the. Garage pehle car ka 40mi cache padhta tha (galat radius) — ab apna.
+_AREA_CACHE        = load_area_cache()
+_AREA_CACHE_DUCT   = load_area_cache(os.path.join(APP_DIR, "areas_cache_duct.json"))
+_AREA_CACHE_GARAGE = load_area_cache(os.path.join(APP_DIR, "areas_cache_garage.json"))
 
 def get_nearby_cities(city_state: str, radius_miles: int = 50) -> list:
     """
@@ -1171,8 +1196,10 @@ def get_targets_for_area(area: str, same_state_only: bool = True,
     mode="duct" -> 60-mile cache (areas_cache_duct.json).
     mode="car"  -> 40-mile cache (areas_cache.json).
     """
-    _duct = (mode or "car").lower() == "duct"
-    _c = _AREA_CACHE_DUCT if _duct else _AREA_CACHE
+    _m = (mode or "car").lower()
+    _c = (_AREA_CACHE_DUCT if _m == "duct"
+          else _AREA_CACHE_GARAGE if _m == "garage"
+          else _AREA_CACHE)
     # DUCT mode ka apna 60-mile cache hai. Pehle yahan car (40-mile) cache
     # par fallback tha — duct area agar duct cache mein na ho to chupke se
     # 40-mile radius chal jata tha. Ab galat radius use nahi hota; cache
@@ -3099,6 +3126,16 @@ async def alert_ss(page, config, reason: str, detail: str = "") -> None:
 
 
 async def join_one_group(page, url, name, area, config, already_joined=None):
+    # Permanent skip (page-not-allowed / members-can't-post / blocked / wrong-
+    # state / non-USA / non-English) ko yaad rakho: disk par save + in-memory
+    # set mein add -> agle rounds/runs mein ye group dobara khulega hi nahi.
+    def _perma_skip():
+        try:
+            save_skipped(url)
+            if already_joined is not None:
+                already_joined.add(url)
+        except Exception:
+            pass
     try:
         _bump_activity()
         await _goto_retry(page, url, timeout=20000, tries=2)
@@ -3170,12 +3207,14 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         if page_blocked:
             send_ui("log", text=f"⛔ Pages not allowed: {name}")
             log_csv(area, name, url, "page_not_allowed", members, privacy)
+            _perma_skip()
             return "skipped"
 
         # Members post nahi kar sakte -> is business ke liye bekaar
         if config.get("skip_no_post", True) and post_disabled:
             send_ui("log", text=f"🚫 Members can't post here, skip: {name}")
             log_csv(area, name, url, "posting_disabled", members, privacy)
+            _perma_skip()
             return "skipped"
 
         # Buy/sell type + employee ke apne "don't-join" keywords
@@ -3195,11 +3234,13 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         if bad_kw:
             send_ui("log", text=f"⏭️  Blocked keyword ('{bad_kw}'), skip: {name}")
             log_csv(area, name, url, "blocked_keyword", members, privacy)
+            _perma_skip()
             return "skipped"
 
         if is_canada:
             send_ui("log", text=f"🍁 Canada group, skip: {name}")
             log_csv(area, name, url, "non_usa", members, privacy)
+            _perma_skip()
             return "skipped"
 
         # ── Doosre state ka group? -> skip ──────────────────
@@ -3225,6 +3266,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 if _other:
                     send_ui("log", text=f"🗺️  Wrong state ({_other}), need {_tgt_st} — skip: {name}")
                     log_csv(area, name, url, "wrong_state", members, privacy)
+                    _perma_skip()
                     return "skipped"
 
         # English-only (backend policy). Body ke sath ab group ka ASLI
@@ -3235,6 +3277,7 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
         if ENGLISH_ONLY and non_english:
             send_ui("log", text=f"🌐 Non-English group ({non_english}), skip: {name}")
             log_csv(area, name, url, "non_english", members, privacy)
+            _perma_skip()
             return "skipped"
 
         if already:
@@ -3396,11 +3439,19 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
     # groups de deta tha aur bot 40/60-mile radius se BAHAR join karta
     # rehta tha. (Purani wajah "county naam match nahi karta" ab nahi
     # rehti - state matching v80 mein theek ho chuki hai.)
-    filter_ok = await apply_fb_filters(page, city)
-    if not filter_ok:
-        send_ui("log", text=f"   ⏭️  Skipping '{city}' — location filter "
-                            f"could not be applied (would search outside the area)")
-        return joined, skipped
+    # Duct Test mode: areas file se aate hain aur pehle se 50-mile ke andar ke
+    # chhote community/unincorporated naam hote hain (Mount Hermon, Agua Dulce,
+    # Portola Valley…). FB ka location filter aise chhote naam apni list mein
+    # match nahi kar pata tha, is liye HAR area "location filter could not be
+    # applied" ke sath SKIP ho jata tha (bot ~0 join karta tha). Naam khud hi
+    # local scope hai — is mode mein location filter chhod do aur seedhe naam
+    # se search karo. Baaki modes (car/duct/garage) mein filter pehle jaisa.
+    if (config.get("business_mode") or "car").lower() != "duct_test":
+        filter_ok = await apply_fb_filters(page, city)
+        if not filter_ok:
+            send_ui("log", text=f"   ⏭️  Skipping '{city}' — location filter "
+                                f"could not be applied (would search outside the area)")
+            return joined, skipped
 
     # Scroll to load ALL groups for this query — "ek ek gali" ka group bhi
     # miss na ho. Pehle sirf 4 fixed scrolls the (bas pehla batch), ab jab
@@ -3705,6 +3756,14 @@ async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=IsolateOrigins,site-per-process",
+        # Disk load control: Chromium ka cache pehle unbounded barhta tha
+        # (har profile ~1GB tak) jisse VPS ki disk I/O saturate ho ke pages
+        # timeout + TargetClosed crash hote the. Cache ~120MB par cap +
+        # backgrounding throttle band -> disk churn bohot kam. Login par koi
+        # asar nahi (login cache mein nahi, Cookies/Local Storage mein hai).
+        "--disk-cache-size=125829120",
+        "--media-cache-size=62914560",
+        "--disable-background-networking",
     ]
     if extra_args:
         args += extra_args
@@ -3767,6 +3826,10 @@ async def _launch_ctx(p, headless: bool, viewport=None, extra_args=None):
 
 async def playwright_main(config):
     already_joined = load_joined()
+    # Permanently-skipped groups bhi pre-open filter mein shaamil karo — taake
+    # page-not-allowed / members-can't-post / blocked / wrong-state groups har
+    # round dobara na khulein (yahi 3000-skip/10-join ka bada sabab tha).
+    already_joined |= load_skipped()
     total         = load_total()
     total_skipped = load_total_skipped()
     # joined_today PERSISTENT hai — agar aaj is profile ne pehle hi X group
@@ -5413,11 +5476,11 @@ def run_playwright(config):
                         config["_end_reason"] = "error"
                         _last_err = "page kept stalling — gave up after many browser restarts"
                         break
-                    for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                        try:
-                            os.remove(os.path.join(PW_PROFILE_DIR, _lk))
-                        except Exception:
-                            pass
+                    # Atke/marey hue browser ke leftover chrome processes maar do
+                    # (warna zombie chrome jama hote rehte -> RAM/disk load barhta
+                    # -> aur crashes). Phir lock files saaf karo.
+                    _kill_stale_chrome_for_profile()
+                    _clear_profile_locks()
                     send_ui("log", text=f"🔄 Browser was stuck — restarting it "
                                         f"(recovery {_stall_restarts}). Today's joins are safe, "
                                         f"joining continues by itself.")
@@ -5446,11 +5509,11 @@ def run_playwright(config):
                                  f"No action needed unless it keeps happening.")
                 except Exception:
                     pass
-                for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-                    try:
-                        os.remove(os.path.join(PW_PROFILE_DIR, _lk))
-                    except Exception:
-                        pass
+                # Crashed browser ke reh-gaye chrome processes maar do + locks
+                # saaf karo -> zombie accumulation aur usse aane wale cascade
+                # crashes rukte hain.
+                _kill_stale_chrome_for_profile()
+                _clear_profile_locks()
                 time.sleep(wait)
                 if stop_event.is_set():
                     config["_end_reason"] = "user_stop"

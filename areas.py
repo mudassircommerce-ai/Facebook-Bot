@@ -12,6 +12,7 @@ CAR_AREAS = [
     "El Paso TX",
     "Baton Rouge LA",
     "Phoenix AZ",
+    "Las Vegas NV",
     "New Jersey",
     "Atlantic City NJ",
     "New York",
