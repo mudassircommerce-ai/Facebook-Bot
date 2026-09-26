@@ -234,6 +234,7 @@
           <button data-v="car">🚗 Car</button>
           <button data-v="duct" class="on">💨 Duct</button>
           <button data-v="garage" id="bizGarage">🔧 Garage</button>
+          <button data-v="duct_test" id="bizDuctTest">🧪 Duct Test</button>
         </div>
         <label class="lbl">Area</label>
         <select id="area" class="inp"></select>
@@ -428,7 +429,7 @@ function applySafe(){const on=$("#safeChk").classList.contains("on");
 
 /* ---- interactions ---- */
 $("#biz").onclick=e=>{const b=e.target.closest("button");if(!b||b.disabled)return;
-  if(b.dataset.v==="garage" && !window._isAdmin){toast("🔒 Only for Admins");return;}
+  if((b.dataset.v==="garage"||b.dataset.v==="duct_test") && !window._isAdmin){toast("🔒 Only for Admins");return;}
   $$(".biz button").forEach(x=>x.classList.remove("on"));b.classList.add("on");
   api("/api/areas?mode="+b.dataset.v).then(r=>buildAreas(r.areas,r.city));};
 $("#pub").oninput=refreshMix;

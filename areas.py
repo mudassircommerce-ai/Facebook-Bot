@@ -160,10 +160,68 @@ GARAGE_AREAS = [
     "Virginia Beach VA",
 ]
 
-AREA_LISTS = {"car": CAR_AREAS, "duct": DUCT_AREAS, "garage": GARAGE_AREAS}
+# ── DUCT TEST mode (sirf ADMIN key par) ─────────────────────────
+# Ye mode duct_test_areas.json use karta hai — jo build_duct_test_areas.py
+# ne duct_test_source.txt (USA SERVICE AREAS list) se banaya. Structure:
+#   { "California": ["Los Angeles County CA", "Vernon CA", ...], ... }
+# Baaki modes (car/duct/garage) mein "area" ek city/state hota hai jise bot
+# radius se expand karta hai. Yahan file mein pehle se 50-mile ke andar ke
+# saare sub-areas maujood hain — isliye UI mein sirf STATE dikhta hai aur
+# bot us state ke sub-areas ko SEEDHE search-target banata hai (koi radius
+# expansion nahi). File na mile / kharab ho -> khali dict (mode chalega
+# nahi, baaki bot par asar nahi).
+import json as _json
+import os as _os
+
+def _load_duct_test():
+    try:
+        p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                          "duct_test_areas.json")
+        with open(p, encoding="utf-8") as f:
+            d = _json.load(f)
+        # normalize: state -> clean list of strings
+        out = {}
+        for st, items in (d or {}).items():
+            lst = [str(x).strip() for x in (items or []) if str(x).strip()]
+            if st and lst:
+                out[str(st).strip()] = lst
+        return out
+    except Exception:
+        return {}
+
+DUCT_TEST_BY_STATE = _load_duct_test()
+DUCT_TEST_STATES = sorted(DUCT_TEST_BY_STATE.keys())
+
+AREA_LISTS = {"car": CAR_AREAS, "duct": DUCT_AREAS, "garage": GARAGE_AREAS,
+              "duct_test": DUCT_TEST_STATES}
 
 def areas_for(mode: str):
+    # duct_test -> dropdown mein sirf STATE names
     return AREA_LISTS.get((mode or "car").lower(), CAR_AREAS)
+
+def duct_test_targets(state: str = "") -> list:
+    """Duct Test mode ke search targets.
+
+    state khali / 'ALL' jaisa -> har state ke saare sub-areas (dedupe).
+    warna sirf us state ke sub-areas. State name case-insensitive match.
+    """
+    st = (state or "").strip()
+    if st and st.lower() not in ("all", "all areas"):
+        # exact ya case-insensitive
+        if st in DUCT_TEST_BY_STATE:
+            return list(DUCT_TEST_BY_STATE[st])
+        for k, v in DUCT_TEST_BY_STATE.items():
+            if k.lower() == st.lower():
+                return list(v)
+        return []
+    # ALL — sab states, dedupe order-preserve
+    out, seen = [], set()
+    for k in DUCT_TEST_STATES:
+        for a in DUCT_TEST_BY_STATE[k]:
+            if a.lower() not in seen:
+                seen.add(a.lower())
+                out.append(a)
+    return out
 
 # Har area ke liye yeh search terms use hote hain
 SEARCH_TEMPLATES = [

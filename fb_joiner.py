@@ -27,7 +27,7 @@ import numpy as np
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 
-from areas import AREAS, CAR_AREAS, DUCT_AREAS, areas_for
+from areas import AREAS, CAR_AREAS, DUCT_AREAS, areas_for, duct_test_targets
 
 # ── License + Usage tracking ────────────────────────────────
 # license_common.py = key verify karta hai (public key isme embedded).
@@ -4039,23 +4039,33 @@ async def playwright_main(config):
                 loop = asyncio.get_event_loop()
                 _same_state = config.get("same_state_only", True)
                 _inc_counties = config.get("include_counties", True)
-                targets = await loop.run_in_executor(
-                    None, get_targets_for_area, area, _same_state, _inc_counties, _mode)
-                random.shuffle(targets)
-                _st = _area_state_code(area)
-                _radius_mi = _radius_for(_mode)
-                # Sach likho: agar radius mein parosi states bhi shamil hain
-                # to unke naam dikhao, "DC only" jaisa jhoot mat bolo.
-                _sts = states_in_targets(targets)
-                if _same_state and _st:
-                    _scope = (f" — {_st} only ({_radius_mi}-mi radius)"
-                              if _sts in ([_st], [])
-                              else f" — {_radius_mi}-mi radius around {_st}"
-                                   f" (states: {', '.join(_sts)})")
+                if _mode == "duct_test":
+                    # Duct Test: file (duct_test_areas.json) mein pehle se is
+                    # STATE ke saare 50-mile ke andar ke sub-areas (county +
+                    # city + town + other) maujood hain — SEEDHE search-target
+                    # banao, koi radius/geocoding expansion nahi.
+                    targets = duct_test_targets(area)
+                    random.shuffle(targets)
+                    send_ui("log", text=f"   🗺️  {len(targets)} areas in {area} "
+                                        f"(counties + cities + towns + communities)")
                 else:
-                    _scope = ""
-                send_ui("log", text=f"   🗺️  {len(targets)} targets" + _scope
-                        + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
+                    targets = await loop.run_in_executor(
+                        None, get_targets_for_area, area, _same_state, _inc_counties, _mode)
+                    random.shuffle(targets)
+                    _st = _area_state_code(area)
+                    _radius_mi = _radius_for(_mode)
+                    # Sach likho: agar radius mein parosi states bhi shamil hain
+                    # to unke naam dikhao, "DC only" jaisa jhoot mat bolo.
+                    _sts = states_in_targets(targets)
+                    if _same_state and _st:
+                        _scope = (f" — {_st} only ({_radius_mi}-mi radius)"
+                                  if _sts in ([_st], [])
+                                  else f" — {_radius_mi}-mi radius around {_st}"
+                                       f" (states: {', '.join(_sts)})")
+                    else:
+                        _scope = ""
+                    send_ui("log", text=f"   🗺️  {len(targets)} targets" + _scope
+                            + (" (cities + counties)" if _inc_counties else " (cities only, no counties)"))
 
                 area_joined_start = joined_today
 

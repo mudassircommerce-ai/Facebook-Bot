@@ -359,8 +359,11 @@ class H(BaseHTTPRequestHandler):
         info = _lic_info()
         if not info.get("ok"):
             return {"error": info.get("error") or "License required"}
-        if (d.get("business_mode") or "").lower() == "garage" and not info.get("admin"):
+        _bm = (d.get("business_mode") or "").lower()
+        if _bm == "garage" and not info.get("admin"):
             return {"error": "\U0001f512 Garage mode is admin-only."}
+        if _bm == "duct_test" and not info.get("admin"):
+            return {"error": "\U0001f512 Duct Test mode is admin-only."}
         if not (d.get("page_link") or "").strip():
             return {"error": "Enter the Facebook Page link first."}
         if not d.get("safe_mode") and not (d.get("city") or "").strip():
