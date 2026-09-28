@@ -920,7 +920,7 @@ DEFAULT_SEARCH_KEYWORDS = [
 DEFAULT_MIN_MEMBERS = 1000  # UI ka default (employee badal sakta hai)
 BIG_MIN_MEMBERS = 5000      # is se upar warning dikhao
 LICENSE_WARN_DAYS = 2       # itne din bachne par renewal reminder
-DAILY_LIMIT = 200           # rozana ki had - LOCKED, employee badal nahi sakta
+DAILY_LIMIT = 500           # rozana ki had - LOCKED, employee badal nahi sakta
 REQUIRE_ACTIVITY = True     # join se pehle recent activity check
 ENGLISH_ONLY = True         # sirf English group
 
