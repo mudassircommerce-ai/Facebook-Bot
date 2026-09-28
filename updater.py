@@ -230,6 +230,58 @@ def check_and_apply(update_url: str, base_dir: str, log=print, alert=None) -> bo
     return True
 
 
+def local_version(base_dir: str) -> int:
+    """Is PC par abhi installed code ka version (.update_ver ka integer).
+    File na ho / khaali ho -> 0."""
+    try:
+        return int(open(os.path.join(base_dir, ".update_ver"),
+                        encoding="utf-8").read().strip() or 0)
+    except Exception:
+        return 0
+
+
+def remote_version(update_url: str):
+    """GitHub manifest ka version (signature-verified) — kuch download NAHI.
+    Net na ho / manifest na ho / signature galat -> None."""
+    update_url = (update_url or "").strip().rstrip("/")
+    if not update_url:
+        return None
+    try:
+        man = json.loads(_get(update_url + "/manifest.json", timeout=12).decode("utf-8"))
+    except Exception:
+        return None
+    files = man.get("files", {})
+    try:
+        import license_common as lic
+        body = json.dumps(files, separators=(",", ":"), sort_keys=True)
+        if not lic._verify(lic._b64u(body.encode()), man.get("sig", ""),
+                           lic.LICENSE_PUBKEY_N, lic.LICENSE_PUBKEY_E):
+            return None
+    except Exception:
+        return None
+    try:
+        return int(str(man.get("version", "")))
+    except Exception:
+        return None
+
+
+def update_available(update_url: str, base_dir: str) -> dict:
+    """Chalte hue bot ke liye HALKA check: naya version aaya hai ya nahi?
+
+    Kuch apply/download NAHI karta — sirf remote manifest version vs local
+    .update_ver compare karta hai. UI is se 'restart for new update' banner
+    dikhata hai. Actual update sirf agle RESTART par _self_update() lagata
+    hai — is se chalti hui joining kabhi beech-session mein nahi rukti.
+
+    Return: {"available": bool, "latest": int|None, "current": int}.
+    Net/manifest na mile -> {"available": False, "latest": None, "current": <local>}.
+    """
+    cur = local_version(base_dir)
+    latest = remote_version(update_url)
+    avail = bool(latest is not None and latest > cur)
+    return {"available": avail, "latest": latest, "current": cur}
+
+
 def check_integrity_only(update_url: str, base_dir: str, log=print, alert=None,
                          heal: bool = True) -> list:
     """

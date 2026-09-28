@@ -44,6 +44,15 @@ _ROWS = []          # {id,time,status,msg,tag}
 _ROW_ID = [0]
 _SETTINGS_SENT = [False]
 
+# ── update-available watcher (chalte hue bot ke liye) ──────────
+# Bot startup par _self_update() latest laga deta hai. Lekin employee
+# ghanton bot chalata rehta hai — is dauraan agar admin naya version
+# publish kare to use RESTART kiye baghair pata nahi chalta. Ye watcher
+# har 30 min GitHub manifest check karta hai (kuch download/apply NAHI),
+# aur naya version mile to UI par "restart for new update" banner aa jata.
+_UPD_LK = threading.Lock()
+_UPD = {"available": False, "latest": None, "current": None}
+
 
 def _classify(text):
     t = (text or "").strip(); low = t.lower()
@@ -133,6 +142,28 @@ def _drain_loop():
                     STATE["search"] = ""
         except Exception:
             pass
+
+
+def _update_watch_loop():
+    """Har 30 min GitHub se check: naya version aaya? Aaya to STATE flag laga
+    do (UI banner dikhata hai). Kuch apply/download NAHI hota — update sirf
+    agle RESTART par lagta hai, is liye chalti hui joining kabhi nahi rukti."""
+    # Sirf wahi bots check karein jinhe updates milte hain (employee .py run).
+    # Dev/admin --no-update ya packaged frozen build par banner nahi chahiye,
+    # kyunki restart karne par bhi update apply nahi hoga.
+    if getattr(sys, "frozen", False) or "--no-update" in sys.argv:
+        return
+    time.sleep(20)                     # startup _self_update() ko pehle chalne do
+    while True:
+        try:
+            import updater
+            u = updater.update_available(getattr(lic, "UPDATE_URL", ""), HERE)
+            with _UPD_LK:
+                _UPD.update(available=u["available"],
+                            latest=u["latest"], current=u["current"])
+        except Exception:
+            pass
+        time.sleep(1800)               # 30 min
 
 
 # ── license / settings helpers ─────────────────────────────
@@ -392,7 +423,7 @@ class H(BaseHTTPRequestHandler):
             return {"error": "🔒 Auto-comment is admin-only."}
         tmpl = (d.get("comment_template") or "").strip()
         if not tmpl:
-            return {"error": "Comment template khali hai — pehle message likhein."}
+            return {"error": "Comment template is empty — write a message first."}
         # template yaad rakho (file + settings)
         try:
             with open(os.path.join(HERE, "comment_template.txt"), "w", encoding="utf-8") as f:
@@ -409,7 +440,7 @@ class H(BaseHTTPRequestHandler):
             STATE.update(running=True, run_start=time.time(),
                          area="💬 Auto-comment mode — watching approvals", search="")
         threading.Thread(target=B.run_autocomment, args=(cfg,), daemon=True).start()
-        return {"ok": True, "msg": "Auto-comment ON — har 15 min approvals check honge."}
+        return {"ok": True, "msg": "Auto-comment ON — approvals checked every 15 min."}
 
     def _simple(self, fn, msg):
         with _LK: STATE["busy"] = True
@@ -429,6 +460,12 @@ class H(BaseHTTPRequestHandler):
 
     def _state(self, since):
         info = _lic_info()
+        with _UPD_LK:
+            upd = dict(_UPD)
+        try:
+            build = B._build_no()          # .update_ver ka live number (jaise 124)
+        except Exception:
+            build = "?"
         with _LK:
             lim = STATE.get("limit") or B.DAILY_LIMIT
             pct = min(100, round(STATE["today"] / lim * 100)) if lim else 0
@@ -442,7 +479,10 @@ class H(BaseHTTPRequestHandler):
                 meta = f"Today's total: {STATE['today']} / {lim}"
             out = {
                 "running": STATE["running"], "busy": STATE["busy"],
-                "account": B.INSTANCE, "version": B.APP_VERSION,
+                "account": B.INSTANCE, "version": B.APP_VERSION, "build": build,
+                "update": {"available": bool(upd.get("available")),
+                           "latest": upd.get("latest"),
+                           "current": upd.get("current")},
                 "stats": {"today": STATE["today"], "limit": lim, "pct": pct,
                           "skipped": STATE["skipped"], "joined_run": STATE["joined_run"],
                           "failed": STATE["failed"]},
@@ -541,6 +581,7 @@ def _self_update():
 def main():
     _self_update()
     threading.Thread(target=_drain_loop, daemon=True).start()
+    threading.Thread(target=_update_watch_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()

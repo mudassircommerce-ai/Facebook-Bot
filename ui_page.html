@@ -181,6 +181,19 @@
   footer .st b{color:var(--muted);font-weight:600;}
   footer .brand{margin-left:auto;color:var(--faint);letter-spacing:.06em;}
 
+  /* update-available banner (chalte hue bot par) */
+  .updbar{display:none;align-items:center;gap:12px;padding:11px 24px;flex:none;
+    color:#ffe4b0;font-size:13px;font-weight:500;
+    border-bottom:1px solid rgba(245,177,61,.38);
+    background:linear-gradient(90deg,rgba(245,177,61,.20),rgba(245,177,61,.05));
+    animation:ubpulse 2.6s ease-in-out infinite;}
+  .updbar.show{display:flex;}
+  .updbar .ub-ic{font-size:16px;animation:ubspin 3.5s linear infinite;}
+  .updbar .ub-txt b{color:#ffd27a;font-weight:800;}
+  @keyframes ubspin{to{transform:rotate(360deg);}}
+  @keyframes ubpulse{0%,100%{background:linear-gradient(90deg,rgba(245,177,61,.20),rgba(245,177,61,.05));}
+    50%{background:linear-gradient(90deg,rgba(245,177,61,.32),rgba(245,177,61,.09));}}
+
   /* modal */
   .veil{position:fixed;inset:0;background:rgba(4,7,14,.7);backdrop-filter:blur(3px);
     display:none;place-items:center;z-index:50;padding:24px;}
@@ -224,6 +237,11 @@
     </div>
   </header>
 
+  <div id="updBar" class="updbar">
+    <span class="ub-ic">🔄</span>
+    <span class="ub-txt">New update available (build <b id="updVer">—</b>) — please <b>restart the bot</b> to get the latest version.</span>
+  </div>
+
   <main>
     <!-- LEFT -->
     <div class="col">
@@ -250,7 +268,7 @@
         <label class="lbl">Daily Join Limit</label>
         <div class="inp lock" id="limLocked"><span id="limVal">200</span><span class="lktag">🔒 set by admin</span></div>
         <input id="limInput" class="inp" value="200" style="display:none;">
-        <div class="mix" id="limNote" style="display:none;">Admin — apni marzi ka limit set karein</div>
+        <div class="mix" id="limNote" style="display:none;">Admin — set any daily limit</div>
         <div class="row2" style="margin-top:12px;">
           <div><label class="lbl">Min public members</label><input id="minpub" class="inp" value="1000"></div>
           <div><label class="lbl">Min private members</label><input id="minpriv" class="inp" value="1000"></div>
@@ -273,8 +291,10 @@
         <textarea id="kw" class="inp mono" spellcheck="false"></textarea>
         <label class="lbl">Don't-join keywords · one per line</label>
         <textarea id="block" class="inp mono" spellcheck="false"></textarea>
-        <label class="lbl">💬 Auto-comment template · approve hone par ye comment jayega</label>
-        <textarea id="ctmpl" class="inp" spellcheck="false" placeholder="e.g. Great group! We offer professional car detailing & duct cleaning in your area — DM us."></textarea>
+        <div id="ctmplWrap" style="display:none;">
+          <label class="lbl">💬 Auto-comment template · sent when a join request is approved</label>
+          <textarea id="ctmpl" class="inp" spellcheck="false" placeholder="e.g. Great group! We offer professional car detailing & duct cleaning in your area — DM us."></textarea>
+        </div>
       </div>
 
       <div class="panel">
@@ -283,7 +303,7 @@
           <button class="obtn" id="btnLogin"><span class="bi">📘</span> Login to Facebook</button>
           <button class="obtn" id="btnLogout"><span class="bi">🚪</span> Log out of Facebook</button>
           <button class="obtn" id="btnAutopost"><span class="bi">📢</span> Auto Post on Page</button>
-          <button class="obtn" id="btnAutocomment"><span class="bi">💬</span> Auto-Comment on Approvals</button>
+          <button class="obtn" id="btnAutocomment" style="display:none;"><span class="bi">💬</span> Auto-Comment on Approvals</button>
           <button class="obtn" id="btnPreflight"><span class="bi">🔎</span> Pre-flight Check</button>
           <button class="start" id="btnStart">▶  START BOT</button>
         </div>
@@ -338,7 +358,7 @@
   <footer id="foot">
     <div class="st"><span class="dot"></span><b id="fStatus">Idle</b></div>
     <div id="fMeta"></div>
-    <div class="brand">NEXFOUR SOLUTION · v<span id="fVer">4.1</span></div>
+    <div class="brand">NEXFOUR SOLUTION · v<span id="fVer">4.1</span> · build <span id="fBuild">—</span></div>
   </footer>
 
   <!-- security modal -->
@@ -488,6 +508,9 @@ async function poll(){
       $("#limLocked").style.display = s.lic.admin ? "none" : "";
       $("#limInput").style.display  = s.lic.admin ? "" : "none";
       $("#limNote").style.display   = s.lic.admin ? "" : "none";
+      // Auto-comment (button + template) is admin-only — hidden from employees entirely
+      $("#btnAutocomment").style.display = s.lic.admin ? "" : "none";
+      const _cw=$("#ctmplWrap"); if(_cw)_cw.style.display = s.lic.admin ? "" : "none";
     }
     if(s.settings)applySettings(s.settings);
     // stats
@@ -512,6 +535,16 @@ async function poll(){
     $("#fStatus").textContent=s.running?"Bot is running":(s.busy?"Working…":"Idle");
     $("#fMeta").textContent=s.footmeta||"";
     $("#fVer").textContent=s.version;
+    if(s.build&&s.build!=="?")$("#fBuild").textContent=s.build;
+    // update-available banner (chalte hue bot par) — restart karne tak dikhta rehta
+    if(s.update){
+      if(s.update.available){
+        $("#updVer").textContent = (s.update.latest!=null? s.update.latest : "—");
+        $("#updBar").classList.add("show");
+      }else{
+        $("#updBar").classList.remove("show");
+      }
+    }
     // security popup once
     if(s.lic&&s.lic.ok&&!window._secShown){window._secShown=true;$("#secVeil").classList.add("show");}
     // new log rows
