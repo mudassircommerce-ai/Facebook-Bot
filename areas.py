@@ -89,6 +89,7 @@ DUCT_AREAS = [
     "Salt Lake City UT",
     "Atlanta GA",
     "Cleveland OH",
+    "Detroit MI",
     "Kansas City MO",
     "St Louis MO",
     "Phoenix AZ",
