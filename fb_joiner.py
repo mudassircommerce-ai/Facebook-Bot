@@ -3995,9 +3995,29 @@ async def playwright_main(config):
                             getattr(lic, "UPDATE_URL", ""), APP_DIR,
                             print, _integrity_alert)
                         if tampered:
-                            send_ui("log", text=f"🚨 File change detected ({', '.join(tampered)}) "
-                                                 f"— alert sent + verified original restored. "
-                                                 f"Joining continues.")
+                            _emp = config.get("employee", "") or "unknown"
+
+                            def _cd_alert(m):
+                                if act:
+                                    try:
+                                        act.alert(m)
+                                    except Exception:
+                                        pass
+
+                            # Employee ne edit kiya -> 1-ghanta cooldown + bot ROK.
+                            # Admin -> cooldown nahi (upar heal+alert ho chuka),
+                            # joining chalti rahe.
+                            if _tamper_cooldown(_emp, tampered, _cd_alert):
+                                send_ui("log", text=f"🛑 Bot files changed "
+                                        f"({', '.join(tampered)}) — bot LOCKED for "
+                                        f"{COOLDOWN_SEC // 60} min. Admin notified. "
+                                        f"Contact the admin.")
+                                config["_end_reason"] = "file_tamper_cooldown"
+                                stop_event.set()
+                                return
+                            send_ui("log", text=f"🚨 File change detected "
+                                    f"({', '.join(tampered)}) — alert sent + verified "
+                                    f"original restored. Joining continues.")
                     except Exception:
                         pass
                 # account block periodically bhi check karo (current page)
@@ -4226,7 +4246,8 @@ async def playwright_main(config):
             config["_end_reason"] = "gemini_down"
         if config.get("_end_reason") not in ("license_expired", "account_blocked",
                                               "pending_limit", "setup_failed",
-                                              "file_tamper", "service_paused",
+                                              "file_tamper", "file_tamper_cooldown",
+                                              "service_paused",
                                               "login_timeout", "no_page_link",
                                               "nothing_left", "gemini_down"):
             config["_end_reason"] = "user_stop" if stop_event.is_set() else "completed"
@@ -4248,6 +4269,7 @@ async def playwright_main(config):
                 "service_paused":  "Paused by the administrator",
                 "setup_failed":    "Pre-flight setup failed",
                 "file_tamper":     "Bot files were modified",
+                "file_tamper_cooldown": "Employee modified bot files — locked 1 hour",
                 "login_timeout":   "Facebook login timed out",
                 "no_page_link":    "Page link missing or wrong",
                 "error":           "Bot crashed",
@@ -5418,7 +5440,8 @@ def run_playwright(config):
     import traceback
     MAX_RESTARTS = 6
     _terminal = ("license_expired", "account_blocked", "pending_limit",
-                 "setup_failed", "file_tamper", "gemini_keys_failed",
+                 "setup_failed", "file_tamper", "file_tamper_cooldown",
+                 "gemini_keys_failed",
                  "service_paused", "login_timeout", "no_page_link",
                  "nothing_left")
     restarts = 0
@@ -5560,6 +5583,9 @@ def run_playwright(config):
         "pending_limit":    "⏸️ Facebook applied a join-request limit (too many pending) — get some approved/cancelled.",
         "gemini_keys_failed":"⚠️ All Gemini API keys are down — need new keys, or try again later.",
         "file_tamper":      "🚨 A bot file was changed — verified files will reload on restart.",
+        "file_tamper_cooldown": (f"🛑 Bot files were modified — this bot is LOCKED for "
+                                 f"{COOLDOWN_SEC // 60} minutes. The admin has been notified. "
+                                 f"Contact the admin; don't edit the bot's files."),
         "service_paused":   "⏸️ The administrator has paused the bot.",
         "setup_failed":     "❌ Could not switch to the Page — check the Page Link / admin access.",
         "no_page_link":     "❌ Page Link is empty — enter your Facebook Page link.",
@@ -6883,6 +6909,22 @@ class App:
                 return
             self.lic_info = info
 
+            # ── Tamper cooldown gate — employee ne bot edit kiya to lock ──
+            # Admin par kabhi lock nahi. Cooldown active ho to START band.
+            if not self._is_admin() and _cooldown_remaining() > 0:
+                _ci = _cooldown_info()
+                _mins = int(_cooldown_remaining() // 60) + 1
+                self.status_var.set(f"●  Locked ({_mins} min) — bot files were changed")
+                messagebox.showerror(
+                    "Bot locked (cooldown)",
+                    "The bot is temporarily LOCKED because its files were "
+                    "modified outside the update system.\n\n"
+                    f"Files: {', '.join(_ci.get('files', [])) or 'bot files'}\n"
+                    f"Locked for about {_mins} more minute(s).\n\n"
+                    "The administrator has already been notified. Please "
+                    "contact the admin — do not edit the bot's files.")
+                return
+
             city = self.city_var.get().strip()
             if not city:
                 self.city_var.set("⚠ Enter an area!")
@@ -7127,6 +7169,78 @@ def _alert_wrong_pc(info: dict) -> None:
         pass
 
 
+# ── Employee tamper COOLDOWN ─────────────────────────────────────
+# Agar koi EMPLOYEE bot ki (RSA-signed manifest se verified) files edit
+# karne ki koshish kare, to us PC par bot 1 ghante ke liye lock ho jata
+# hai aur admin ko Discord par turant pata chal jata hai (kis employee ne,
+# kaunsi file). ADMIN license par kabhi cooldown nahi lagta (dev freely
+# edit kar sake). Cooldown state file par persist hoti hai taake bot
+# restart karne se lock na hate.
+COOLDOWN_SEC = 3600   # 1 ghanta
+_COOLDOWN_FILE = os.path.join(APP_DIR, f".cooldown{SUFFIX}.json")
+
+
+def _current_is_admin() -> bool:
+    """Runtime admin check (UI ke bahar bhi chal sakta hai) — RSA-signed
+    license ka admin flag; employee na naam badal sakta hai na flag laga."""
+    try:
+        info = lic.validate_key(lic.load_active_key(), check_url=False)
+        return bool(info.get("ok") and info.get("admin"))
+    except Exception:
+        return False
+
+
+def _cooldown_info() -> dict:
+    try:
+        return json.load(open(_COOLDOWN_FILE, encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _cooldown_remaining() -> float:
+    """Cooldown ke baaki seconds (0 = koi active cooldown nahi)."""
+    try:
+        rem = float(_cooldown_info().get("until", 0)) - time.time()
+        return rem if rem > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _set_cooldown(employee: str, files) -> None:
+    try:
+        with open(_COOLDOWN_FILE, "w", encoding="utf-8") as f:
+            json.dump({"until": time.time() + COOLDOWN_SEC,
+                       "by": employee or "unknown",
+                       "files": list(files or []),
+                       "started": datetime.now().isoformat(timespec="seconds")}, f)
+    except Exception:
+        pass
+
+
+def _tamper_cooldown(employee: str, tampered, alert_fn=None) -> bool:
+    """Tamper hone par cooldown lagao. ADMIN ho to kuch nahi (return False,
+    dev ko rok/alert nahi). Warna: 1-ghanta cooldown file likho + Discord par
+    alert (kis bande ne, kaunsi files, kitni der lock). Return True = cooldown
+    laga -> caller ko bot ROK dena chahiye."""
+    if _current_is_admin():
+        return False
+    _set_cooldown(employee, tampered)
+    mins = COOLDOWN_SEC // 60
+    files = ", ".join(tampered) if tampered else "bot files"
+    msg = (f"🛑 COOLDOWN: '{employee or 'unknown'}' tried to modify the bot "
+           f"({files}). The bot is LOCKED on this PC for {mins} minutes and "
+           f"won't run until then. (Admin licenses are never locked.)")
+    try:
+        if alert_fn:
+            alert_fn(msg)
+        else:
+            import activity
+            activity.send_alert(employee or "unknown", msg, sync=True)
+    except Exception:
+        pass
+    return True
+
+
 def _self_update():
     """Startup par check karo — naye files mile to lene ke baad bot ko
     naye code ke saath restart karo. Frozen .exe par skip (chalti exe
@@ -7165,6 +7279,19 @@ def _self_update():
             subprocess.Popen([sys.executable] + sys.argv, cwd=APP_DIR,
                              close_fds=True)
             sys.exit(0)
+
+        # Koi update nahi hua (same version). Ab same-version TAMPER check:
+        # employee ne bot stopped hone ke dauraan koi file edit ki ho to
+        # yahin 1-ghanta cooldown lag jaye (admin exempt). check_integrity_only
+        # khud version match hone par hi kaam karta hai + file heal kar deta hai.
+        if not _current_is_admin():
+            try:
+                _tampered = updater.check_integrity_only(
+                    getattr(lic, "UPDATE_URL", ""), APP_DIR, print, None)
+                if _tampered:
+                    _tamper_cooldown(_emp, _tampered)
+            except Exception:
+                pass
     except SystemExit:
         raise
     except Exception:
