@@ -2965,17 +2965,27 @@ def _min_members_for(config, privacy: str) -> int:
 
 
 def _quota_block(config, privacy: str):
-    """Public/Private ratio quota — should this group be skipped for now?
+    """Public/Private CAP quota — should this group be skipped?
     Returns (message, csv_status), else (None, None).
 
-    The employee sets what % of joins should be public (rest private).
-    Whichever type runs ahead of target is skipped until the other one
-    catches up, so the mix stays near the target across the session.
+    CAP-BASED (2026-09-29): employee jo public% set karta hai (baqi private),
+    us se daily-limit ke hisaab se HARD caps bante hain:
+        pub_cap  = round(public% / 100 * daily_limit)
+        priv_cap = daily_limit - pub_cap
+    Ek type ka group SIRF tab skip hota hai jab US type ka apna cap pura ho
+    chuka ho — us se pehle jo bhi mile join hota hai (koi group ratio ki wajah
+    se zaya nahi hota). Pehle running-ratio (±5%) tha jo har us type ko skip
+    karta tha jo thoda bhi aage nikal jaye — us se sainkdon groups zaya hote
+    the aur daily limit tak pohanchna slow tha. NOTE: yeh sirf public/private
+    MIX ka control hai; keyword-block, low-members, already-joined wagera baqi
+    saare skips alag se chalte hain, unpar koi asar nahi.
     """
     pub_pct = config.get("public_pct", 30)
+    daily_limit = config.get("daily_limit", DAILY_LIMIT)
     jp = config.get("_jp", 0)
     jv = config.get("_jpriv", 0)
-    tot = jp + jv
+    pub_cap = round(pub_pct / 100.0 * daily_limit)
+    priv_cap = daily_limit - pub_cap
 
     # 0% ya 100% = employee ne EK type maanga hai. Aise mein jis group ki
     # privacy padhi hi na ja sake usse bhi chhor do — warna "0% public"
@@ -2991,13 +3001,13 @@ def _quota_block(config, privacy: str):
     if privacy == "Public":
         if pub_pct <= 0:
             return "100% private set — skipping public", "ratio_public"
-        if tot >= 4 and (jp + 1) / (tot + 1) > pub_pct / 100.0 + 0.05:
-            return f"Public quota reached ({jp}/{tot})", "ratio_public"
+        if jp >= pub_cap:
+            return f"Public cap full ({jp}/{pub_cap})", "ratio_public"
     elif privacy == "Private":
         if pub_pct >= 100:
             return "100% public set — skipping private", "ratio_private"
-        if tot >= 4 and (jv + 1) / (tot + 1) > (100 - pub_pct) / 100.0 + 0.05:
-            return f"Private quota reached ({jv}/{tot})", "ratio_private"
+        if jv >= priv_cap:
+            return f"Private cap full ({jv}/{priv_cap})", "ratio_private"
     return None, None
 
 
