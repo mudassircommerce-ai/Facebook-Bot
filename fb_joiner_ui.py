@@ -234,6 +234,9 @@ def _current_settings():
         "search_keywords": _clean_kw_list(s.get("search_keywords")) or B.default_search_keyword_lines(),
         "block_keywords": _clean_kw_list(s.get("block_keywords")) or B.resolve_block_keywords(),
         "comment_template": s.get("comment_template") or _read_comment_template(),
+        "comment_image": s.get("comment_image") or "",
+        "post_message": s.get("post_message") or "",
+        "post_image": s.get("post_image") or "",
         "daily_limit": int(s.get("daily_limit", B.DAILY_LIMIT) or B.DAILY_LIMIT),
     }
 
@@ -380,11 +383,10 @@ class H(BaseHTTPRequestHandler):
                 self._json({"msg": "Activate a license first."}); return
             cfg = _build_config(d, info)
             self._json(self._simple(lambda: B.run_preflight(cfg), "Running pre-flight check…"))
+        elif u.path == "/api/upload":
+            self._json(self._upload(d))
         elif u.path == "/api/autopost":
-            info = _lic_info()
-            if not (info.get("ok") and info.get("admin")):
-                self._json({"msg": "🔒 Auto-post is admin-only."}); return
-            self._json({"msg": "Auto-post: use the desktop app for now."})
+            self._json(self._start_autopost(d))
         elif u.path == "/api/autocomment":
             self._json(self._start_autocomment(d))
         elif u.path == "/api/activate":
@@ -431,25 +433,95 @@ class H(BaseHTTPRequestHandler):
         if not info.get("admin"):
             return {"error": "🔒 Auto-comment is admin-only."}
         tmpl = (d.get("comment_template") or "").strip()
-        if not tmpl:
-            return {"error": "Comment template is empty — write a message first."}
-        # template yaad rakho (file + settings)
+        cimg = (d.get("comment_image") or "").strip()
+        if cimg and not os.path.exists(cimg):
+            return {"error": f"Card image not found on this PC: {cimg}"}
+        if not tmpl and not cimg:
+            return {"error": "Write a comment message or set a card image first."}
+        # template + card image yaad rakho (file + settings)
         try:
-            with open(os.path.join(HERE, "comment_template.txt"), "w", encoding="utf-8") as f:
-                f.write(tmpl)
-            B.update_settings({"comment_template": tmpl})
+            if tmpl:
+                with open(os.path.join(HERE, "comment_template.txt"), "w", encoding="utf-8") as f:
+                    f.write(tmpl)
+            B.update_settings({"comment_template": tmpl, "comment_image": cimg})
         except Exception:
             pass
         cfg = {"employee": info.get("employee", "") or "unknown",
                "license_key": lic.load_active_key(),
                "gemini_keys": B.resolve_gemini_keys(""),
-               "comment_template": tmpl}
+               "comment_template": tmpl, "comment_image": cimg}
         B.stop_event.clear(); B.user_stop_event.clear()
         with _LK:
             STATE.update(running=True, run_start=time.time(),
                          area="💬 Auto-comment mode — watching approvals", search="")
         threading.Thread(target=B.run_autocomment, args=(cfg,), daemon=True).start()
         return {"ok": True, "msg": "Auto-comment ON — approvals checked every 15 min."}
+
+    def _upload(self, d):
+        """Browser se bheji gayi image (base64) ko is PC par save karo aur
+        uska local path wapas do (auto-post / auto-comment usi path se image
+        uthate hain). Admin-only (ye features admin-only hain)."""
+        info = _lic_info()
+        if not (info.get("ok") and info.get("admin")):
+            return {"error": "🔒 Upload is admin-only."}
+        import base64
+        name = os.path.basename((d.get("name") or "upload.jpg").strip()) or "upload.jpg"
+        data = d.get("data") or ""
+        if data.startswith("data:") and "," in data:
+            data = data.split(",", 1)[1]
+        try:
+            raw = base64.b64decode(data)
+        except Exception:
+            return {"error": "Could not read the image file."}
+        if not raw:
+            return {"error": "Empty file."}
+        if len(raw) > 12 * 1024 * 1024:
+            return {"error": "Image too big (max 12 MB)."}
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "upload.jpg"
+        if not re.search(r"\.(jpg|jpeg|png|gif|webp|bmp)$", safe, re.I):
+            safe += ".jpg"
+        updir = os.path.join(HERE, "uploads")
+        try:
+            os.makedirs(updir, exist_ok=True)
+            path = os.path.join(updir, safe)
+            with open(path, "wb") as f:
+                f.write(raw)
+        except Exception as e:
+            return {"error": "Save failed: " + str(e)[:80]}
+        return {"ok": True, "path": path, "name": safe}
+
+    def _start_autopost(self, d):
+        info = _lic_info()
+        if not info.get("ok"):
+            return {"error": info.get("error") or "License required"}
+        if not info.get("admin"):
+            return {"error": "🔒 Auto-post is admin-only."}
+        msg = (d.get("post_message") or "").strip()
+        if not msg:
+            return {"error": "Post text is empty — write the post first."}
+        img = (d.get("post_image") or "").strip()
+        if img and not os.path.exists(img):
+            return {"error": f"Image not found on this PC: {img}"}
+        # yaad rakho (agli dafa prefill ho jaye)
+        try:
+            B.update_settings({"post_message": msg, "post_image": img})
+        except Exception:
+            pass
+        cfg = {
+            "employee": info.get("employee", "") or "unknown",
+            "license_key": lic.load_active_key(),
+            "license_exp": info.get("exp", ""), "key_id": info.get("kid", ""),
+            "gemini_keys": B.resolve_gemini_keys(""),
+            "page_link": (d.get("page_link") or "").strip(),
+            "page_name": B.DEFAULT_PAGE_NAME,
+            "post_message": msg, "post_image": img,
+        }
+        B.stop_event.clear(); B.user_stop_event.clear()
+        with _LK:
+            STATE["busy"] = True
+            STATE["area"] = "📢 Auto-post — posting to your joined groups"
+        threading.Thread(target=B.run_autopost, args=(cfg,), daemon=True).start()
+        return {"ok": True, "msg": "Auto-post started — a browser will open and post to each joined group."}
 
     def _simple(self, fn, msg):
         with _LK: STATE["busy"] = True

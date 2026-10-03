@@ -98,6 +98,8 @@
   .nextrow .bx{width:18px;height:18px;flex:none;border:1px solid #33425e;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;color:transparent;}
   .nextrow.on .bx{background:var(--blue);border-color:var(--blue);color:#fff;}
   .nextrow .ord{margin-left:auto;font-size:11px;color:var(--blue-hi);font-weight:700;min-width:18px;text-align:right;}
+  input.filein{padding:8px 10px;cursor:pointer;font-size:12px;}
+  input.filein::file-selector-button{background:var(--blue);color:#fff;border:0;border-radius:7px;padding:6px 12px;margin-right:10px;cursor:pointer;font-weight:600;}
 
   .mix{color:var(--dim);font-size:11.5px;margin-top:6px;}
 
@@ -304,6 +306,20 @@
         <div id="ctmplWrap" style="display:none;">
           <label class="lbl">💬 Auto-comment template · sent when a join request is approved</label>
           <textarea id="ctmpl" class="inp" spellcheck="false" placeholder="e.g. Great group! We offer professional car detailing & duct cleaning in your area — DM us."></textarea>
+          <label class="lbl">🖼 Card / picture (optional)</label>
+          <input type="file" id="cfile" accept="image/*" class="inp filein">
+          <div class="mix" id="cimgnote">No card selected.</div>
+          <input type="hidden" id="cimg">
+          <div class="mix">Set a message, a card image, or both. On each approved join, the bot comments with them.</div>
+        </div>
+        <div id="apWrap" style="display:none;">
+          <label class="lbl">📢 Auto-post text · posted to every joined group (not yet posted)</label>
+          <textarea id="apmsg" class="inp" spellcheck="false" placeholder="e.g. Professional car detailing & duct cleaning in your area — book today! 📞 …"></textarea>
+          <label class="lbl">Image (optional)</label>
+          <input type="file" id="apfile" accept="image/*" class="inp filein">
+          <div class="mix" id="apimgnote">No image selected — text-only post.</div>
+          <input type="hidden" id="apimg">
+          <div class="mix">Press “Auto Post on Page” to start. A browser opens and posts to each joined group.</div>
         </div>
       </div>
 
@@ -443,6 +459,9 @@ function applySettings(s){
   $("#kw").value=(s.search_keywords||[]).join("\n");
   $("#block").value=(s.block_keywords||[]).join("\n");
   $("#ctmpl").value=s.comment_template||"";
+  $("#cimg").value=s.comment_image||""; setImgNote("cimgnote", s.comment_image, "No card selected.");
+  $("#apmsg").value=s.post_message||"";
+  $("#apimg").value=s.post_image||""; setImgNote("apimgnote", s.post_image, "No image selected — text-only post.");
   $("#limVal").textContent=s.daily_limit; $("#tLimit").textContent=s.daily_limit;
   $("#limInput").value=s.daily_limit;
 }
@@ -508,12 +527,38 @@ $("#btnStart").onclick=async()=>{
 };
 $("#btnLogin").onclick=async()=>{const r=await api("/api/login",{});toast(r.msg||"Opening browser…");};
 $("#btnLogout").onclick=async()=>{const r=await api("/api/logout",{});toast(r.msg||"Logging out…");};
-$("#btnAutopost").onclick=async()=>{const r=await api("/api/autopost",{});toast(r.msg||"…");};
+$("#btnAutopost").onclick=async()=>{
+  if(!window._isAdmin){toast("🔒 Only for Admins");return;}
+  const msg=($("#apmsg").value||"").trim();
+  if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
+  const r=await api("/api/autopost",{post_message:msg,post_image:($("#apimg").value||"").trim(),page_link:$("#page").value.trim()});
+  toast(r.error||r.msg||"…");};
 $("#btnAutocomment").onclick=async()=>{
   if(!window._isAdmin){toast("🔒 Only for Admins");return;}
-  const r=await api("/api/autocomment",{comment_template:$("#ctmpl").value});
+  const r=await api("/api/autocomment",{comment_template:$("#ctmpl").value,comment_image:($("#cimg").value||"").trim()});
   toast(r.error||r.msg||"…");
 };
+/* ---- image upload (auto-post / auto-comment card) ---- */
+function setImgNote(noteId, path, emptyMsg){
+  const n=$("#"+noteId); if(!n)return;
+  if(path){const base=(""+path).split(/[\\/]/).pop(); n.textContent="✓ "+base; n.style.color="var(--green)";}
+  else{n.textContent=emptyMsg; n.style.color="";}
+}
+function uploadImage(file, noteId, hiddenId, emptyMsg){
+  if(!file)return;
+  if(!window._isAdmin){toast("🔒 Only for Admins");return;}
+  const n=$("#"+noteId); if(n){n.textContent="⏳ uploading…"; n.style.color="";}
+  const fr=new FileReader();
+  fr.onload=async()=>{
+    const r=await api("/api/upload",{name:file.name,data:fr.result});
+    if(r.error){toast(r.error); setImgNote(noteId,"",emptyMsg); return;}
+    $("#"+hiddenId).value=r.path; setImgNote(noteId, r.path, emptyMsg);
+    toast("🖼 image uploaded");
+  };
+  fr.readAsDataURL(file);
+}
+$("#apfile").onchange=e=>uploadImage(e.target.files[0],"apimgnote","apimg","No image selected — text-only post.");
+$("#cfile").onchange=e=>uploadImage(e.target.files[0],"cimgnote","cimg","No card selected.");
 $("#btnPreflight").onclick=async()=>{const r=await api("/api/preflight",collect());toast(r.msg||"Checking…");};
 $("#btnClear").onclick=()=>{$("#logBody").innerHTML="";};
 $("#secOk").onclick=()=>$("#secVeil").classList.remove("show");
@@ -556,6 +601,7 @@ async function poll(){
       // Auto-comment (button + template) is admin-only — hidden from employees entirely
       $("#btnAutocomment").style.display = s.lic.admin ? "" : "none";
       const _cw=$("#ctmplWrap"); if(_cw)_cw.style.display = s.lic.admin ? "" : "none";
+      const _aw=$("#apWrap"); if(_aw)_aw.style.display = s.lic.admin ? "" : "none";
     }
     if(s.settings)applySettings(s.settings);
     // stats

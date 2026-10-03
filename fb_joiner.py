@@ -4774,6 +4774,25 @@ async def _autopost_main(config):
                     await sleep(rand_delay(4, 9))
                     continue
 
+                # Is group mein HAMARA post pehle se "pending admin approval"
+                # par hai? To dobara mat daalo (warna duplicate pending ban
+                # jate hain). Mark karke agle group par jao.
+                try:
+                    _full = (await page.inner_text("body")).lower()
+                except Exception:
+                    _full = _bt
+                if ("your post is pending" in _full
+                        or "post is pending approval" in _full
+                        or "pending approval from the group" in _full
+                        or "waiting for approval" in _full
+                        or "your pending post" in _full
+                        or "awaiting approval" in _full):
+                    _mark_posted(url)
+                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending approval "
+                                        f"— not posting again: {gname}")
+                    await sleep(rand_delay(3, 6))
+                    continue
+
                 # Auto-post mein posting-limit bhi rukne ki wajah hai
                 blk = await check_account_block(page, include_post_limit=True)
                 if blk:
@@ -5010,16 +5029,43 @@ async def _comment_on_post(page, url, message, config):
     box = await _find_comment_box(page)
     if not box:
         return "nobox"
+    img = (config.get("comment_image") or "").strip()
     try:
         await box.click()
         await sleep(rand_delay(0.6, 1.2))
-        await box.type(message, delay=25)
-        await sleep(rand_delay(0.6, 1.2))
+        if message:
+            await box.type(message, delay=25)
+            await sleep(rand_delay(0.6, 1.2))
+        # Card / picture attach (optional) — comment toolbar ka photo button
+        # dhoondo, phir uske file-input par image daal do. Fail ho to text-only
+        # comment phir bhi chala jata hai (graceful).
+        if img and os.path.exists(img):
+            try:
+                for pv in ('div[aria-label="Attach a photo or video" i]',
+                           'div[aria-label="Comment with a photo or sticker" i]',
+                           'div[role="button"][aria-label*="photo" i]',
+                           'div[role="button"][aria-label*="Photo" i]'):
+                    pb = page.locator(pv).last
+                    if await pb.count() and await pb.is_visible():
+                        await pb.click()
+                        break
+                await sleep(1)
+                fi = page.locator('input[type="file"][accept*="image"]').last
+                if not await fi.count():
+                    fi = page.locator('input[type="file"]').last
+                await fi.set_input_files(img)
+                await sleep(rand_delay(4, 8))   # upload hone do
+            except Exception:
+                pass
         await page.keyboard.press("Enter")
         await sleep(rand_delay(2.5, 4))
     except Exception:
         return "error"
 
+    if not message:
+        # sirf card/image bheji — text verify ka matlab nahi, 'posted' maan lo
+        # (warna loop ise done mark nahi karega aur baar-baar comment karega)
+        return "posted"
     status = await _verify_comment(page, message)
     if status == "pending":
         try:
@@ -5033,11 +5079,14 @@ async def _comment_on_post(page, url, message, config):
 async def _autocomment_main(config):
     """ON rehne wala loop: har 15 min approvals check + comment."""
     template = _comment_template(config)
-    if not template:
-        send_ui("log", text="⚠️ Auto-comment: koi template message nahi mila "
-                            "(comment_template.txt khali). Ruk gaye.")
+    _cimg = (config.get("comment_image") or "").strip()
+    if not template and not (_cimg and os.path.exists(_cimg)):
+        send_ui("log", text="⚠️ Auto-comment: na koi template message hai na card "
+                            "image. Kam se kam ek do. Ruk gaye.")
         send_ui("autocomment_done")
         return
+    if _cimg:
+        send_ui("log", text=f"🖼  Card image set — har approved post par comment ke saath jayegi.")
 
     global GEMINI_KEYS
     GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
