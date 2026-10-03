@@ -91,6 +91,13 @@
   .check.on .bx{background:var(--blue);border-color:var(--blue);color:#fff;}
   .check span{font-size:12.5px;color:var(--muted);}
   textarea.inp{resize:none;height:66px;line-height:1.6;}
+  .nextbox{max-height:150px;overflow:auto;border:1px solid #243149;border-radius:10px;padding:5px;margin-top:4px;background:rgba(0,0,0,.15);}
+  .nextbox.disabled{opacity:.4;pointer-events:none;}
+  .nextrow{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:7px;cursor:pointer;font-size:13px;color:var(--txt);}
+  .nextrow:hover{background:rgba(255,255,255,.05);}
+  .nextrow .bx{width:18px;height:18px;flex:none;border:1px solid #33425e;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;color:transparent;}
+  .nextrow.on .bx{background:var(--blue);border-color:var(--blue);color:#fff;}
+  .nextrow .ord{margin-left:auto;font-size:11px;color:var(--blue-hi);font-weight:700;min-width:18px;text-align:right;}
 
   .mix{color:var(--dim);font-size:11.5px;margin-top:6px;}
 
@@ -256,6 +263,9 @@
         </div>
         <label class="lbl">Area</label>
         <select id="area" class="inp"></select>
+        <label class="lbl" id="nextLbl">Next areas — when the one above runs out (in the order you tick)</label>
+        <div id="nextBox" class="nextbox"></div>
+        <div class="mix" id="nextNote">Tick the areas the bot should move to after the main one. It runs the main area first, then these in tick-order, then stops. Leave empty = only the main area.</div>
         <label class="lbl">Facebook Page Link</label>
         <div class="with-ic"><span class="ci">🔗</span>
           <input id="page" class="inp" placeholder="https://www.facebook.com/profile.php?id=…">
@@ -413,6 +423,7 @@ function collect(){return{
   include_counties:$("#f_county").classList.contains("on"),
   safe_mode:$("#safeChk").classList.contains("on"),
   search_keywords:$("#kw").value, block_keywords:$("#block").value,
+  next_areas:(window.nextOrder||[]),
   daily_limit:(+$("#limInput").value||0),
 };}
 
@@ -420,6 +431,7 @@ function applySettings(s){
   if(settingsLoaded)return; settingsLoaded=true;
   $$(".biz button").forEach(b=>b.classList.toggle("on",b.dataset.v===(s.business_mode||"car")));
   buildAreas(s.areas||[], s.city);
+  buildNextAreas(s.areas||[], s.city, s.next_areas||[]);
   $("#page").value=s.page_link||"";
   $("#minpub").value=s.min_members_public; $("#minpriv").value=s.min_members_private;
   $("#dmin").value=s.delay_min; $("#dmax").value=s.delay_max;
@@ -436,22 +448,55 @@ function applySettings(s){
 }
 function buildAreas(list,sel){
   const a=$("#area"); a.innerHTML="";
+  window._allAreas=(list||[])[0]||window._allAreas;
   (list||[]).forEach(x=>{const o=document.createElement("option");o.value=x;o.textContent=x;
     if(x===sel)o.selected=true;a.appendChild(o);});
 }
+/* ---- ordered "next areas" picker ---- */
+window.nextOrder=window.nextOrder||[];
+function buildNextAreas(list,mainSel,preselected){
+  const box=$("#nextBox"); if(!box)return; box.innerHTML="";
+  window._allAreas=(list||[])[0]||window._allAreas;
+  const all=(list||[]).filter(x=>x!==window._allAreas && x!==mainSel);
+  window.nextOrder=(preselected||[]).filter(x=>all.includes(x));
+  all.forEach(x=>{
+    const row=document.createElement("label"); row.className="nextrow"; row.dataset.v=x;
+    row.innerHTML='<span class="bx">✓</span><span>'+x+'</span><span class="ord"></span>';
+    if(window.nextOrder.includes(x))row.classList.add("on");
+    row.onclick=()=>{const i=window.nextOrder.indexOf(x);
+      if(i>=0){window.nextOrder.splice(i,1);row.classList.remove("on");}
+      else{window.nextOrder.push(x);row.classList.add("on");}
+      renderNextOrder();};
+    box.appendChild(row);
+  });
+  renderNextOrder(); updateNextDisabled();
+}
+function renderNextOrder(){
+  $$("#nextBox .nextrow").forEach(r=>{const i=window.nextOrder.indexOf(r.dataset.v);
+    r.querySelector(".ord").textContent=i>=0?("#"+(i+1)):"";});
+}
+function updateNextDisabled(){
+  const main=$("#area").value, safe=$("#safeChk").classList.contains("on");
+  const off=safe||main===window._allAreas;
+  $("#nextBox").classList.toggle("disabled",off);
+  $("#nextLbl").style.opacity=off?.5:1; $("#nextNote").style.opacity=off?.5:1;
+}
+$("#area").onchange=()=>{const list=[...$("#area").options].map(o=>o.value);
+  buildNextAreas(list,$("#area").value,window.nextOrder||[]);};
 function refreshMix(){const p=Math.max(0,Math.min(100,+$("#pub").value||0));
   $("#mix").textContent=`→ ${p}% public / ${100-p}% private`;}
 function applySafe(){const on=$("#safeChk").classList.contains("on");
   $$(".biz button").forEach(b=>b.disabled=on);
   $("#area").disabled=on; $("#pub").disabled=on;
   if(on){$$(".biz button").forEach(b=>b.classList.toggle("on",b.dataset.v==="duct"));
-    $("#pub").value=0; refreshMix();}}
+    $("#pub").value=0; refreshMix();}
+  updateNextDisabled();}
 
 /* ---- interactions ---- */
 $("#biz").onclick=e=>{const b=e.target.closest("button");if(!b||b.disabled)return;
   if((b.dataset.v==="garage"||b.dataset.v==="duct_test") && !window._isAdmin){toast("🔒 Only for Admins");return;}
   $$(".biz button").forEach(x=>x.classList.remove("on"));b.classList.add("on");
-  api("/api/areas?mode="+b.dataset.v).then(r=>buildAreas(r.areas,r.city));};
+  api("/api/areas?mode="+b.dataset.v).then(r=>{buildAreas(r.areas,r.city);buildNextAreas(r.areas,r.city,[]);});};
 $("#pub").oninput=refreshMix;
 $("#safeChk").onclick=()=>{$("#safeChk").classList.toggle("on");applySafe();};
 ["f_nopost","f_state","f_county"].forEach(id=>$("#"+id).onclick=()=>$("#"+id).classList.toggle("on"));

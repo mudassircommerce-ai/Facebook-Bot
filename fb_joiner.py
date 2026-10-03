@@ -4081,14 +4081,28 @@ async def playwright_main(config):
         _area_list = areas_for(_mode)
         send_ui("log", text=f"🧩 Mode: {_mode.upper()}  ·  {len(_area_list)} areas in this list")
 
-        # Area order: agar ek specific area chuna hai to WOH pehle, phir
-        # baaki SAARE areas (taake area khatam hone par bot rukta nahi —
-        # khud agle area par chala jata hai). "ALL AREAS" = sab shuffle.
+        # Area order:
+        #  • "ALL AREAS"  -> saare areas shuffle (jaise pehle).
+        #  • Web UI ne  next_areas  key bheji -> SIRF employee ke chune areas:
+        #       main area pehle, phir uski chuni hui "next areas" USI ORDER
+        #       mein. Baaki areas par NAHI jata; sab khatam -> ruk jata hai.
+        #  • Legacy (purana config / tkinter, next_areas key nahi) -> main
+        #       area pehle, phir baaki SAARE areas shuffle (purana behavior).
         _others = [a for a in _area_list if a != selection]
-        random.shuffle(_others)
+        _has_next = "next_areas" in config
+        _ordered = False
         if selection == ALL_AREAS_LABEL:
+            random.shuffle(_others)
             areas_to_run = _others
+        elif _has_next:
+            _ordered = True
+            _seen, areas_to_run = set(), []
+            for a in [selection] + list(config.get("next_areas") or []):
+                if a in _area_list and a not in _seen:
+                    _seen.add(a)
+                    areas_to_run.append(a)
         else:
+            random.shuffle(_others)
             areas_to_run = [selection] + _others
 
         total_areas = len(areas_to_run)
@@ -4108,8 +4122,12 @@ async def playwright_main(config):
         except Exception:
             pass
 
-        send_ui("log", text=f"📍 {total_areas} area(s) queued "
-                            f"— bot won't stop when one finishes, it moves to the next.")
+        if _ordered:
+            send_ui("log", text=f"📍 {total_areas} area(s) queued in YOUR order "
+                                f"— bot runs only these, in order, then stops.")
+        else:
+            send_ui("log", text=f"📍 {total_areas} area(s) queued "
+                                f"— bot won't stop when one finishes, it moves to the next.")
 
         # OUTER loop: saare areas khatam ho jayein aur limit bhi na lagi ho
         # to phir se shuru (naye bane groups mil sakte hain). Ek poore pass
@@ -4119,8 +4137,9 @@ async def playwright_main(config):
             _round += 1
             _round_start = joined_today
             if _round > 1:
-                send_ui("log", text=f"\n🔁 Round {_round} — re-scanning all areas for newly created groups…")
-                random.shuffle(areas_to_run)
+                send_ui("log", text=f"\n🔁 Round {_round} — re-scanning for newly created groups…")
+                if not _ordered:          # ordered = employee ka chuna order barqarar rakho
+                    random.shuffle(areas_to_run)
 
             for area_idx, area in enumerate(areas_to_run, 1):
                 if stop_event.is_set() or joined_today >= limit:

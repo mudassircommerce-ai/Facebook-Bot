@@ -219,6 +219,8 @@ def _current_settings():
         "business_mode": mode,
         "areas": [B.ALL_AREAS_LABEL] + list(B.areas_for(mode)),
         "city": s.get(f"city{suf}") or s.get("city") or B.ALL_AREAS_LABEL,
+        "next_areas": [str(x).strip() for x in (s.get(f"next_areas{suf}")
+                       or s.get("next_areas") or []) if str(x).strip()],
         "page_link": s.get(f"page_link{suf}") or s.get("page_link") or "",
         "min_members_public": int(s.get("min_members_public", B.DEFAULT_MIN_MEMBERS) or 0),
         "min_members_private": int(s.get("min_members_private", B.DEFAULT_MIN_MEMBERS) or 0),
@@ -253,8 +255,13 @@ def _build_config(d, info):
     mode = (d.get("business_mode") or "car").lower()
     safe = bool(d.get("safe_mode"))
     city = d.get("city") or B.ALL_AREAS_LABEL
+    # Ordered "next areas" — main area ke baad inhi par (usi order mein) bot
+    # jata hai, phir ruk jata hai. ALL-AREAS / safe-mode mein ignore.
+    next_areas = [str(x).strip() for x in (d.get("next_areas") or []) if str(x).strip()]
     if safe:
-        mode = "duct"; pub = 0; city = B.ALL_AREAS_LABEL
+        mode = "duct"; pub = 0; city = B.ALL_AREAS_LABEL; next_areas = []
+    if city == B.ALL_AREAS_LABEL:
+        next_areas = []
     # Daily limit: ADMIN apni marzi ka set kar sakta hai; employee LOCKED 200.
     lim = B.DAILY_LIMIT
     if info.get("admin"):
@@ -283,6 +290,7 @@ def _build_config(d, info):
         "search_keywords": kw_lines,
         "_search_templates": B.resolve_search_keywords("\n".join(kw_lines)),
         "business_mode": mode, "safe_mode": safe,
+        "next_areas": next_areas,   # web UI hamesha bhejta (khali bhi) -> ordered-only mode
     }
     return cfg
 
@@ -293,6 +301,7 @@ def _persist(d):
         B.update_settings({
             f"page_link{suf}": (d.get("page_link") or "").strip(),
             f"city{suf}": d.get("city") or B.ALL_AREAS_LABEL,
+            f"next_areas{suf}": [str(x).strip() for x in (d.get("next_areas") or []) if str(x).strip()],
             f"business_mode{suf}": (d.get("business_mode") or "car").lower(),
             "public_pct": max(0, min(100, int(d.get("public_pct", 30) or 0))),
             "min_members_public": int(d.get("min_members_public", B.DEFAULT_MIN_MEMBERS) or 0),
