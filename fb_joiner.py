@@ -4781,51 +4781,26 @@ async def _autopost_main(config):
                     _full = (await page.inner_text("body")).lower()
                 except Exception:
                     _full = _bt
-                if ("your post is pending" in _full
+                # FB banner (member group, hamara post pending): exact text
+                #   "Pending admin approval  ·  N post  ·  Learn more"
+                if ("pending admin approval" in _full
+                        or "your post is pending" in _full
                         or "post is pending approval" in _full
                         or "pending approval from the group" in _full
                         or "waiting for approval" in _full
                         or "your pending post" in _full
                         or "awaiting approval" in _full):
                     _mark_posted(url)
-                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending approval "
+                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending admin approval "
                                         f"— not posting again: {gname}")
                     await sleep(rand_delay(3, 6))
                     continue
 
-                # ── MEMBERSHIP GUARD ──────────────────────────────
-                # Sirf un groups mein post karo jinke hum ASAL MEMBER hain.
-                # Private groups mein aksar sirf "request" gayi hoti hai (join
-                # PENDING) — un par post nahi karna. Non-member par header mein
-                # 'Join group' / 'Request to join' / 'Cancel request' /
-                # 'Requested' button hota hai; member par 'Leave'/'Joined' ya
-                # composer. Member na ho to is run mein SKIP (mark NAHI karte —
-                # taake approve hone ke baad agli run post kar sake).
-                _is_member = ("leave group" in _full or "you're a member" in _full
-                              or "you joined" in _full or "you are a member" in _full)
-                _not_member = False
-                if not _is_member:
-                    for sel in ('div[role="button"]:has-text("Join group")',
-                                'div[role="button"]:has-text("Request to join")',
-                                'div[role="button"]:has-text("Cancel request")',
-                                'div[role="button"]:has-text("Requested")',
-                                'a[role="button"]:has-text("Join group")',
-                                'div[aria-label="Join group" i]',
-                                'div[aria-label="Request to join" i]',
-                                'div[aria-label="Cancel request" i]'):
-                        try:
-                            b = page.locator(sel).first
-                            if await b.count() and await b.is_visible(timeout=500):
-                                _not_member = True
-                                break
-                        except Exception:
-                            continue
-                if _not_member and not _is_member:
-                    fails += 1
-                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] not a member yet "
-                                        f"(join pending / not joined) — skipped: {gname}")
-                    await sleep(rand_delay(3, 6))
-                    continue
+                # (Membership guard hata diya gaya — woh "Suggested groups" ke
+                #  Join buttons par false-positive de kar member groups ko bhi
+                #  skip kar deta tha. Non-member groups waise bhi safe hain:
+                #  composer na mile to _post_to_group khud 'nocomposer' deta hai
+                #  aur post nahi hota.)
 
                 # Auto-post mein posting-limit bhi rukne ki wajah hai
                 blk = await check_account_block(page, include_post_limit=True)
