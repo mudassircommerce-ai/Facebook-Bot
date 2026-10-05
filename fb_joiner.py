@@ -4506,6 +4506,60 @@ def _joined_group_urls() -> list:
     return out
 
 
+def _group_id(u: str) -> str:
+    """URL se group ka id/slug nikaalo (/groups/<id>/...)."""
+    m = re.search(r"/groups/([^/?#]+)", u or "")
+    return m.group(1).lower() if m else ""
+
+
+async def _fetch_joined_group_ids(page) -> set:
+    """Account ki ASAL joined-groups list Facebook se nikalo (profile ki
+    'Your groups'). Set of group-id/slug return karti hai. Fail / kuch na mile
+    -> KHALI set (caller phir filter nahi karega, purani list hi use karega —
+    warna sab skip ho jata). Best-effort: scroll karke jitne load hon."""
+    ids = set()
+    _NONID = {"feed", "joins", "create", "discover", "search", "category",
+              "your_groups_and_more", "requests", "notifications"}
+    for src in ("https://www.facebook.com/groups/joins/",
+                "https://www.facebook.com/groups/feed/"):
+        try:
+            await _goto_retry(page, src, timeout=25000, tries=2)
+            await sleep(3)
+            await dismiss_popups(page)
+        except Exception:
+            continue
+        last, stable = 0, 0
+        for _ in range(45):           # ~scroll passes (badi list bhi load ho jaye)
+            if stop_event.is_set():
+                break
+            try:
+                hrefs = await page.eval_on_selector_all(
+                    'a[href*="/groups/"]',
+                    "els => els.map(e => e.getAttribute('href') || '')")
+            except Exception:
+                hrefs = []
+            for h in hrefs or []:
+                m = re.search(r"/groups/([^/?#]+)", h or "")
+                if m:
+                    gid = m.group(1).lower()
+                    if gid and gid not in _NONID and not gid.startswith("?"):
+                        ids.add(gid)
+            if len(ids) == last:
+                stable += 1
+                if stable >= 4:        # 4 scroll tak koi naya nahi -> bas
+                    break
+            else:
+                stable, last = 0, len(ids)
+            try:
+                await page.mouse.wheel(0, 3200)
+            except Exception:
+                pass
+            await sleep(rand_delay(1.2, 2.0))
+        if ids:
+            break
+    return ids
+
+
 async def _dismiss_group_gates(page):
     """Group kholte hi kabhi 'group rules' / 'Next' / 'Got it' / 'I agree'
     wale interstitials aate hain — unko click karke aage niklo."""
@@ -4733,6 +4787,36 @@ async def _autopost_main(config):
                 send_ui("log", text="❌ Not logged in — open the bot, log in, then retry.")
                 await ctx.close(); send_ui("autopost_done"); return
 
+            # ── Pehle account ki ASAL joined-groups list FB se nikalo ──────
+            # Phir sirf unhi groups par post karo (non-member/pending groups
+            # kholne ka waqt hi zaya nahi hota -> bahut tez + koi ghalat post
+            # nahi). List fetch fail/kam ho to purani list par fall-back
+            # (per-group 'Join Group' check phir bhi safety net hai).
+            send_ui("log", text="🔎 Reading the account's joined groups from Facebook…")
+            try:
+                member_ids = await _fetch_joined_group_ids(page)
+            except Exception:
+                member_ids = set()
+            if len(member_ids) >= 10:
+                _before = len(urls)
+                _filt = [u for u in urls if _group_id(u) in member_ids]
+                if _filt:
+                    urls = _filt
+                    send_ui("log", text=f"   ✅ {len(member_ids)} joined groups found on FB — "
+                                        f"posting only to these ({_before}→{len(urls)} after filter).")
+                else:
+                    # filter ne sab uda diya (shayad URL id-format mismatch) —
+                    # purani list rakho, per-group check safety net hai.
+                    send_ui("log", text=f"   ⚠️ Joined list didn't match the saved group URLs "
+                                        f"— using the saved list + per-group membership check.")
+            else:
+                send_ui("log", text=f"   ⚠️ Could not read a full joined list "
+                                    f"({len(member_ids)} found) — using the saved list, "
+                                    f"and checking membership per group.")
+            if not urls:
+                send_ui("log", text="   Nothing to post — no joined groups left (all already posted).")
+                await ctx.close(); send_ui("autopost_done"); return
+
             plink = (config.get("page_link") or DEFAULT_PAGE_LINK).strip()
             if plink:
                 await switch_via_link(page, plink, config.get("page_name", ""))
@@ -4796,11 +4880,37 @@ async def _autopost_main(config):
                     await sleep(rand_delay(3, 6))
                     continue
 
-                # (Membership guard hata diya gaya — woh "Suggested groups" ke
-                #  Join buttons par false-positive de kar member groups ko bhi
-                #  skip kar deta tha. Non-member groups waise bhi safe hain:
-                #  composer na mile to _post_to_group khud 'nocomposer' deta hai
-                #  aur post nahi hota.)
+                # ── MEMBERSHIP CHECK (precise) ────────────────────
+                # Sirf un groups mein post karo jinke account ASAL MEMBER hai.
+                # Member NA ho to group header par PRIMARY button "Join Group"
+                # / "Request to Join" / "Cancel Request" / "Requested" dikhta
+                # hai (screenshot wala blue button). Yahan EXACT accessible-name
+                # se dekhte hain (get_by_role exact) — is liye sidebar ke
+                # "Suggested groups" wale 'Join' buttons false-positive NAHI
+                # dete (pichli broad :has-text wali galti theek). Member na ho
+                # to skip (mark NAHI — approve/join hone ke baad agli run post
+                # kar sake).
+                _not_member = False
+                for _nm in ("Join Group", "Join group", "Join group ",
+                            "Request to Join", "Request to join",
+                            "Cancel Request", "Cancel request", "Requested"):
+                    try:
+                        jb = page.get_by_role("button", name=_nm, exact=True).first
+                        if await jb.count() and await jb.is_visible(timeout=400):
+                            _not_member = True
+                            break
+                        jl = page.get_by_role("link", name=_nm, exact=True).first
+                        if await jl.count() and await jl.is_visible(timeout=200):
+                            _not_member = True
+                            break
+                    except Exception:
+                        continue
+                if _not_member:
+                    fails += 1
+                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] NOT a member "
+                                        f"(Join/Request button in header) — skipped: {gname}")
+                    await sleep(rand_delay(2, 4))
+                    continue
 
                 # Auto-post mein posting-limit bhi rukne ki wajah hai
                 blk = await check_account_block(page, include_post_limit=True)
