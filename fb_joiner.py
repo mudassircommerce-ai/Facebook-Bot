@@ -364,7 +364,15 @@ SETTINGS_FILE = os.path.join(APP_DIR, "bot_settings.json")
 
 _gk_idx = 0               # abhi kaunsi key use ho rahi hai
 _gk_cooldown = {}         # key -> monotonic time tak woh key skip karni hai
-_GK_COOLDOWN_SEC = 90     # 429 ke baad key kitni der aaram kare
+_GK_COOLDOWN_SEC = 90     # 429 (rate-limit) ke baad key kitni der aaram kare
+_GK_ERR_COOLDOWN_SEC = 1800   # ERROR (invalid/auth-fail) key — 30 min skip, warna
+                              # har sawal par dobara try hoti hai aur ~60s zaya
+                              # karti hai (bahut si bad keys => 6 min+ stall =>
+                              # hang-guard browser maar deta hai => "crash")
+_GK_PASS_BUDGET_SEC = 45      # ek sawal par Gemini keys try karne ki max time —
+                              # is se zyada block na ho (warna hang-guard fire)
+_gk_budget_cut = False        # pichla pass budget ki wajah se kata (sab keys
+                              # try nahi huin) -> "all keys dead" mat samjho
 
 _ACT = None               # current session ka ActivityLog — module-level
                           # functions (jaise _gemini_sync) se bhi Discord
@@ -639,7 +647,7 @@ def _gemini_once(api_key, question, city):
         url = GEMINI_ENDPOINT.format(model=model)
         try:
             req = urllib.request.Request(url, data=body, headers=headers)
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=12) as r:
                 data = json.loads(r.read().decode("utf-8"))
             txt = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             if model != GEMINI_MODEL:
@@ -648,9 +656,21 @@ def _gemini_once(api_key, question, city):
                 GEMINI_MODEL = model
             return txt.strip('"').strip() or None
         except urllib.error.HTTPError as e:
-            if e.code in (429, 403):
+            if e.code == 429:
                 continue    # is model par rate-limit — agla model try karo
                             # (per-key quota per-model hoti hai, blanket nahi)
+            if e.code == 403:
+                # 403 = quota (agla model try karo) YA invalid/permission key.
+                # Agar key hi invalid/permission-denied hai to baaki models bhi
+                # fail honge — foran ERROR do (har model par 12s zaya mat karo).
+                try:
+                    _eb = e.read().decode("utf-8", "replace").lower()
+                except Exception:
+                    _eb = ""
+                if ("api key not valid" in _eb or "api_key_invalid" in _eb
+                        or "permission" in _eb or "consumer" in _eb):
+                    return "ERROR"
+                continue
             all_ratelimited = False
             if e.code in (503, 404):
                 # 503 high-demand / 404 deprecated -> isi key se agla model try karo
@@ -673,20 +693,30 @@ def _gemini_once(api_key, question, city):
 
 
 def _gk_one_pass(question, city, keys, n):
-    """Ek round — saari keys pe ek-ek baar try karo (jo cooldown mein nahi
-    hain). Jawab mile to wapas karo, warna None."""
-    global _gk_idx
-    now = time.monotonic()
+    """Ek round — keys pe ek-ek baar try karo (jo cooldown mein nahi hain).
+    Jawab mile to wapas karo. BUDGET: ek sawal par _GK_PASS_BUDGET_SEC se
+    zyada waqt nahi lagta (warna hang-guard browser maar deta hai) — bache
+    keys agle sawal par. ERROR (invalid/auth) keys 30 min cooldown mein jaati
+    hain taake har sawal par dobara ~60s zaya na karein."""
+    global _gk_idx, _gk_budget_cut
+    _gk_budget_cut = False
+    start = time.monotonic()
     i = _gk_idx % n
     for tried in range(n):
+        now = time.monotonic()
+        if now - start > _GK_PASS_BUDGET_SEC:
+            _gk_budget_cut = True      # sab keys try nahi huin — "dead" mat samjho
+            break
         k = keys[i]
         if _gk_cooldown.get(k, 0) <= now:
             res = _gemini_once(k, question, city)
+            now = time.monotonic()
             if res == "RATELIMIT":
                 _gk_cooldown[k] = now + _GK_COOLDOWN_SEC
                 send_ui("log", text=f"   🔁 Gemini key #{i+1} rate-limited → next key")
             elif res == "ERROR":
-                send_ui("log", text=f"   ↻ Gemini key #{i+1} error → next key")
+                _gk_cooldown[k] = now + _GK_ERR_COOLDOWN_SEC
+                send_ui("log", text=f"   ↻ Gemini key #{i+1} error → cooling 30 min, next key")
             elif res:
                 _gk_idx = i           # is key pe tik jao jab tak chale
                 return res
@@ -727,13 +757,20 @@ def _gemini_sync(question, city):
     ans = _gk_one_pass(question, city, keys, n)
     if ans:
         return ans
+    if _gk_budget_cut:
+        # Budget ki wajah se saari keys try nahi huin — bot MAT roko. Is sawal
+        # ka jawab template se de do; bachi/cooled keys agle sawal par try
+        # hongi (bad keys ab 30 min cooldown mein, is liye jaldi good key milegi).
+        return None
 
     time.sleep(4)
     ans = _gk_one_pass(question, city, keys, n)
     if ans:
         return ans
+    if _gk_budget_cut:
+        return None
 
-    # Retry ke baad bhi saari keys fail. Bot ko ROKTA NAHI — sirf is sawaal
+    # Retry ke baad bhi saari (non-cooled) keys fail. Bot ko ROKTA NAHI — sirf is sawaal
     # ka jawab built-in template se dega aur chalta rahega. Ek Discord note
     # (spam nahi), phir 10 min tak Gemini try hi nahi karega.
     # Retry ke baad bhi saari keys fail -> bot ROK do. 5 min baad khud
@@ -1179,10 +1216,10 @@ def _target_state(target: str) -> str:
 
 
 def _radius_for(mode: str) -> int:
-    """Har business ka search radius (miles). Car 40, Garage 50, Duct 60."""
+    """Har business ka search radius (miles). Car 40, Garage 50, Duct 35."""
     m = (mode or "car").lower()
     if m == "duct":
-        return 60
+        return 35
     if m == "garage":
         return 50
     return 40
@@ -4776,9 +4813,31 @@ async def _autopost_main(config):
 
     done = fails = 0
     try:
+        # ── FIX pehle chalao: pichli run ka atka/zombie chrome + profile lock
+        # saaf karo. Agar lock reh jaye to auto-post ka browser KHULTA HI NAHI
+        # ("kisi ke khulta, kisi ke nahi" wala masla). Safai ke baad launch;
+        # agar phir bhi na khule to deep-clean karke EK dafa aur try.
+        try:
+            _kill_stale_chrome_for_profile()
+            _clear_profile_locks()
+        except Exception:
+            pass
         async with async_playwright() as p:
-            ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
-                                   extra_args=["--start-maximized"])
+            try:
+                ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
+                                       extra_args=["--start-maximized"])
+            except Exception as _le:
+                send_ui("log", text=f"⚠️ Browser didn't open ({str(_le)[:70]}) — "
+                                    f"running the fix (clearing stuck Chrome/locks) and retrying…")
+                try:
+                    _kill_stale_chrome_for_profile()
+                    _clear_profile_locks()
+                except Exception:
+                    pass
+                await asyncio.sleep(4)
+                ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
+                                       extra_args=["--start-maximized"])
+                send_ui("log", text="✅ Fix worked — browser opened on retry.")
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=25000)
             await sleep(3)
@@ -4951,7 +5010,16 @@ async def _autopost_main(config):
 
             await ctx.close()
     except Exception as e:
-        send_ui("log", text=f"auto-post error: {str(e)[:100]}")
+        send_ui("log", text=f"❌ Auto-post couldn't run — the browser failed to open even "
+                            f"after the auto-fix ({str(e)[:70]}). Close any open Chrome for "
+                            f"this profile and press Auto Post again; if it keeps happening, "
+                            f"restart the bot (close & reopen START.bat).")
+        try:
+            _a = config.get("_activity")
+            if _a:
+                _a.alert(f"Auto-post browser failed to open even after auto-fix: {str(e)[:100]}")
+        except Exception:
+            pass
 
     send_ui("log", text=f"\n■ AUTO-POST DONE — posted {done}, skipped/failed {fails}.")
     try:
