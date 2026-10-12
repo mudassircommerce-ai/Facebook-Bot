@@ -401,6 +401,12 @@ class H(BaseHTTPRequestHandler):
         info = _lic_info()
         if not info.get("ok"):
             return {"error": info.get("error") or "License required"}
+        # Auto-post / login / pre-flight (busy) chal raha ho to joining START
+        # mat karo — ek hi profile par DO browser conflict/crash karte hain.
+        with _LK:
+            _busy = STATE.get("busy") and not STATE.get("running")
+        if _busy:
+            return {"error": "⏳ Auto-post or another task is running — wait for it to finish, then START."}
         _bm = (d.get("business_mode") or "").lower()
         if _bm == "garage" and not info.get("admin"):
             return {"error": "\U0001f512 Garage mode is admin-only."}
@@ -496,6 +502,11 @@ class H(BaseHTTPRequestHandler):
             return {"error": info.get("error") or "License required"}
         if not info.get("admin"):
             return {"error": "🔒 Auto-post is admin-only."}
+        # Joining chal rahi ho to auto-post mat chalao (dono ek saath = conflict).
+        with _LK:
+            _running = STATE.get("running")
+        if _running:
+            return {"error": "Joining is running — press STOP first, then Auto Post."}
         msg = (d.get("post_message") or "").strip()
         if not msg:
             return {"error": "Post text is empty — write the post first."}

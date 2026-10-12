@@ -522,6 +522,7 @@ $("#safeChk").onclick=()=>{$("#safeChk").classList.toggle("on");applySafe();};
 
 $("#btnStart").onclick=async()=>{
   if(ST.running){await api("/api/stop",{});toast("Stopping…");return;}
+  if(ST.busy){toast("⏳ Auto-post / another task is running — wait for it to finish, then START");return;}
   const r=await api("/api/start",collect());
   if(r.error)toast(r.error); else toast("Bot started");
 };
@@ -620,6 +621,9 @@ async function poll(){
     // buttons
     $("#btnStart").textContent=s.running?"⏹  STOP BOT":"▶  START BOT";
     $("#btnStart").classList.toggle("stop",s.running);
+    // auto-post/login/etc (busy) ke dauraan START band — warna joining bhi
+    // chal padti hai aur ek hi profile par DO browser conflict/crash karte hain.
+    $("#btnStart").disabled = s.busy && !s.running;
     ["btnLogin","btnLogout","btnAutopost","btnAutocomment","btnPreflight"].forEach(id=>$("#"+id).disabled=s.running||s.busy);
     // footer
     $("#foot").classList.toggle("run",s.running);
