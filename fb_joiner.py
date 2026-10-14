@@ -4882,6 +4882,7 @@ async def _autopost_main(config):
             await sleep(2)
 
             _act = config.get("_activity")
+            _last_post_at = 0.0          # 1 post/min pacing ke liye
             for i, url in enumerate(urls, 1):
                 if stop_event.is_set():
                     break
@@ -4984,6 +4985,21 @@ async def _autopost_main(config):
                     stop_event.set()
                     break
 
+                # ── 1 POST PER MINUTE pacing ──────────────────────
+                # Har post ke beech ~60 sec (chhoti jitter se robotic na lage).
+                # Pichle post ko jitna waqt ho chuka (beech ke skips/load sab
+                # shamil) utna ghata ke bachी der ruk jao -> steady ~1 post/min.
+                if _last_post_at:
+                    _until = _last_post_at + rand_delay(58, 63)
+                    _rem = _until - time.time()
+                    if _rem > 1:
+                        send_ui("log", text=f"   ⏱️ 1 post/min — waiting {int(_rem)}s…")
+                        while time.time() < _until and not stop_event.is_set():
+                            await asyncio.sleep(min(3, max(0.2, _until - time.time())))
+                if stop_event.is_set():
+                    break
+                _last_post_at = time.time()
+
                 res = await _post_to_group(page, msg, img)
                 if res in ("posted", "pending"):
                     done += 1
@@ -4999,14 +5015,6 @@ async def _autopost_main(config):
                 else:
                     fails += 1
                     send_ui("log", text=f"   ⚠️ [{i}/{len(urls)}] post failed: {gname} (retry next run)")
-
-                # rest cycle + delay
-                if done and done % 10 == 0 and not stop_event.is_set():
-                    send_ui("log", text="😴 10 posts — resting 5 min…")
-                    _e = time.time() + 300
-                    while time.time() < _e and not stop_event.is_set():
-                        await asyncio.sleep(5)
-                await sleep(rand_delay(8, 12))     # ~10 sec between posts
 
             await ctx.close()
     except Exception as e:
