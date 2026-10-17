@@ -189,6 +189,7 @@
   footer.run .dot{background:var(--green);box-shadow:0 0 0 3px var(--green-glow);}
   footer .st b{color:var(--muted);font-weight:600;}
   footer .brand{margin-left:auto;color:var(--faint);letter-spacing:.06em;}
+  footer .brand #fVer, footer .brand #fBuild{color:var(--muted);font-weight:700;}
 
   /* update-available banner (chalte hue bot par) */
   .updbar{display:none;align-items:center;gap:12px;padding:11px 24px;flex:none;
@@ -243,12 +244,13 @@
       <div class="it"><span class="ic">👑</span> Licensed to: <b id="licName">—</b></div>
       <div class="it"><span class="ic">📅</span> Expires: <b id="licExp" class="ok">—</b></div>
       <div class="it"><span class="ic">👤</span> Account: <b id="acct">—</b></div>
+      <div class="it"><span class="ic">🧩</span> Version: <b id="hVer" class="ok">—</b></div>
     </div>
   </header>
 
   <div id="updBar" class="updbar">
     <span class="ub-ic">🔄</span>
-    <span class="ub-txt">New update available (build <b id="updVer">—</b>) — please <b>restart the bot</b> to get the latest version.</span>
+    <span class="ub-txt">New update (build <b id="updVer">—</b>) — installing &amp; restarting automatically…</span>
   </div>
 
   <main>
@@ -630,7 +632,7 @@ async function poll(){
     $("#fStatus").textContent=s.running?"Bot is running":(s.busy?"Working…":"Idle");
     $("#fMeta").textContent=s.footmeta||"";
     $("#fVer").textContent=s.version;
-    if(s.build&&s.build!=="?")$("#fBuild").textContent=s.build;
+    if(s.build&&s.build!=="?"){$("#fBuild").textContent=s.build; $("#hVer").textContent="v"+s.build;}
     // update-available banner (chalte hue bot par) — restart karne tak dikhta rehta
     if(s.update){
       if(s.update.available){
