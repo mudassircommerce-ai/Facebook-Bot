@@ -83,6 +83,12 @@ STALL_RESTART_SEC   = 360      # 6 min bina kisi progress ke = atka hua
 STALL_MAX_RESTARTS  = 40       # itni baar tak stall-recovery, phir hi haar
 _LAST_ACTIVITY      = time.monotonic()
 
+# Auto-post: FB block/limit par bot rukta NAHI — 10 min rest phir wapsi try.
+# Lekin lagataar itni baar block ho to ruk jao (checkpoint par account ko
+# nuqsan na ho). Har kamyaab post ke baad counter 0 ho jata hai.
+AUTOPOST_REST_SEC   = 600      # 10 min
+AUTOPOST_MAX_RESTS  = 6        # lagataar itne block ke baad hi stop
+
 def _bump_activity():
     """Joining loop ne abhi kuch kiya — stall-watchdog ka timer reset."""
     global _LAST_ACTIVITY
@@ -264,23 +270,56 @@ _SCRIPT_CHECKS = [
 ]
 
 
+# Spanish-EXCLUSIVE characters — English mein kabhi nahi aate, ek hi kaafi.
+_ES_CHARS = re.compile(r'[ñ¿¡]')
+# Accented vowels (Spanish + Portuguese) — 2+ = non-English.
+_ES_ACCENTS = re.compile(r'[áéíóúÁÉÍÓÚàãõÃÕêôâ]')
+# Unambiguous Spanish/Portuguese WORDS (word-boundary — start/middle/end sab,
+# aur "vendor"/"rental"/"Europa" jaise English words false-match NAHI karte).
+# Sirf wo jo English mein kabhi nahi (place-name el/la/de/los NAHI). 1 hit=flag.
+_ES_WORDS = re.compile(
+    r'\b(?:'
+    r'clasificados|compraventa|compra|venta|ventas|vende|venden|vendo|vendemos|'
+    r'renta|rentas|alquila|alquiler|'
+    r'hispanohablantes|hispano|hispanos|hispana|hispanas|'
+    r'latino|latinos|latina|latinas|espa\w*ol|comunidad|vecinos|vecindario|'
+    r'muebles|ropa|usado|usados|barato|baratos|empleos|trabajos|ofertas|'
+    r'miembros|publicar|bienvenidos|bienvenidas|gracias|nosotros|nuestra|'
+    r'nuestro|años|hola|amigos|familia|familias|brasileiros|brasileiras|'
+    r'obrigad\w+'
+    r')\b', re.I)
+# Multi-word Spanish phrases (substring, 1 hit).
+_STRONG_ES = (
+    "compra y venta", "se vende", "se venden", "se renta", "se alquila",
+    "en venta", "en español", "en espanol", "solo español", "solo espanol",
+    "comunidad hispana", "comunidad latina", "grupo hispano", "grupo latino",
+    "para hispanos", "mercado libre", "habla hispana",
+)
+
+
 def detect_non_english(text: str, short: bool = False) -> str:
     """Group English nahi hai to reason string, warna khaali string.
-    1) Non-Latin script (Arabic/Hebrew/CJK/Cyrillic/Devanagari/Thai/Greek)
-       thodi si bhi mile -> foran non-English (in scripts mein English
-       kabhi nahi likha jata, false-positive risk zero).
-    2) Warna Spanish/Portuguese ke 2+ distinctive alfaz milen to bhi
-       non-English (naam English ho tab bhi).
-
-    short=True group ke NAAM ke liye — threshold kam ho jata hai. Poore
-    body text (2500 chars) ke liye 6 hits theek hain, lekin naam sirf
-    chand lafzon ka hota hai: "凤凰城社区" ke 4 characters 6 wale
-    threshold se neeche reh jate the aur group join ho jata tha."""
+    1) Non-Latin script (Arabic/Hebrew/CJK/Cyrillic/...) — foran non-English.
+    2) Spanish-exclusive chars ñ/¿/¡ — ek hi kaafi.
+    3) 2+ accented vowels (á é í ó ú …) — Spanish/Portuguese.
+    4) Koi unambiguous Spanish word/phrase (clasificados, vendo, se vende,
+       comunidad, español…) — ek bhi kaafi.
+    5) Warna weaker Spanish/Portuguese markers 2+.
+    short=True group ke NAAM ke liye (chota text)."""
     t = text or ""
     for label, rx, min_hits in _SCRIPT_CHECKS:
         if len(rx.findall(t)) >= (2 if short else min_hits):
             return label
+    if _ES_CHARS.search(t):
+        return "Spanish (ñ/¿/¡)"
+    if len(_ES_ACCENTS.findall(t)) >= 2:
+        return "Spanish/Portuguese (accents)"
+    if _ES_WORDS.search(t):
+        return "Spanish word"
     tl = t.lower()
+    for w in _STRONG_ES:
+        if w in tl:
+            return "Spanish content"
     hits = sum(1 for m in NON_ENGLISH_MARKERS if m in tl)
     return "non-English content" if hits >= 2 else ""
 
@@ -4856,22 +4895,24 @@ async def _autopost_main(config):
                 member_ids = await _fetch_joined_group_ids(page)
             except Exception:
                 member_ids = set()
+            # NOTE: list se DROP nahi karte. Pehle "filter" karte the (sirf
+            # member_ids wale rakhte) — lekin FB ki IDs numeric hoti hain aur
+            # saved URLs bahut se SLUG, is liye match sirf 2-3 hota tha aur bot
+            # baaki asal members chhor kar "complete" keh deta tha (BUG). Ab:
+            # koi group hatao mat — sirf TARTEEB badlo (confirmed members pehle),
+            # baaki ke non-members ko per-group 'Join Group' check waise bhi skip
+            # kar deta hai. Is tarah SAARE joined groups cover hote hain.
             if len(member_ids) >= 10:
-                _before = len(urls)
-                _filt = [u for u in urls if _group_id(u) in member_ids]
-                if _filt:
-                    urls = _filt
-                    send_ui("log", text=f"   ✅ {len(member_ids)} joined groups found on FB — "
-                                        f"posting only to these ({_before}→{len(urls)} after filter).")
-                else:
-                    # filter ne sab uda diya (shayad URL id-format mismatch) —
-                    # purani list rakho, per-group check safety net hai.
-                    send_ui("log", text=f"   ⚠️ Joined list didn't match the saved group URLs "
-                                        f"— using the saved list + per-group membership check.")
+                _conf = [u for u in urls if _group_id(u) in member_ids]
+                _rest = [u for u in urls if _group_id(u) not in member_ids]
+                urls = _conf + _rest
+                send_ui("log", text=f"   ✅ {len(member_ids)} joined groups found on FB "
+                                    f"({len(_conf)} matched saved list) — posting to ALL "
+                                    f"{len(urls)} saved groups (confirmed members first).")
             else:
-                send_ui("log", text=f"   ⚠️ Could not read a full joined list "
-                                    f"({len(member_ids)} found) — using the saved list, "
-                                    f"and checking membership per group.")
+                send_ui("log", text=f"   ℹ️ Joined-list read small/failed ({len(member_ids)}) — "
+                                    f"posting to all {len(urls)} saved groups "
+                                    f"(per-group membership check still applies).")
             if not urls:
                 send_ui("log", text="   Nothing to post — no joined groups left (all already posted).")
                 await ctx.close(); send_ui("autopost_done"); return
@@ -4883,6 +4924,7 @@ async def _autopost_main(config):
 
             _act = config.get("_activity")
             _last_post_at = 0.0          # 1 post/min pacing ke liye
+            _ap_rests = 0                # lagataar FB-block rests (success par 0)
             for i, url in enumerate(urls, 1):
                 if stop_event.is_set():
                     break
@@ -4925,15 +4967,14 @@ async def _autopost_main(config):
                     _full = (await page.inner_text("body")).lower()
                 except Exception:
                     _full = _bt
-                # FB banner (member group, hamara post pending): exact text
-                #   "Pending admin approval  ·  N post  ·  Learn more"
+                # FB banner (member group, HAMARA post pending): exact text
+                #   "Pending admin approval  ·  N post  ·  Learn more".
+                # SIRF wo markers jo pakka HAMARE pending post ko point karein —
+                # generic "waiting/awaiting approval" nahi (wo kisi group ki
+                # rules/description text mein bhi aa sakta tha -> galat skip).
                 if ("pending admin approval" in _full
                         or "your post is pending" in _full
-                        or "post is pending approval" in _full
-                        or "pending approval from the group" in _full
-                        or "waiting for approval" in _full
-                        or "your pending post" in _full
-                        or "awaiting approval" in _full):
+                        or "your pending post" in _full):
                     _mark_posted(url)
                     send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending admin approval "
                                         f"— not posting again: {gname}")
@@ -4972,18 +5013,42 @@ async def _autopost_main(config):
                     await sleep(rand_delay(2, 4))
                     continue
 
-                # Auto-post mein posting-limit bhi rukne ki wajah hai
+                # FB ne posting block/limit kar diya? -> bot RUKTA NAHI: 10 min
+                # aaram, phir wapsi try. Lagataar AUTOPOST_MAX_RESTS baar block
+                # ho (koi kamyaab post nahi) to hi ruk jata hai (checkpoint par
+                # account ko aur nuqsan na ho). Kamyaab post par counter 0.
                 blk = await check_account_block(page, include_post_limit=True)
                 if blk:
                     blk = await confirm_account_block(page, blk, include_post_limit=True)
                 if blk:
-                    send_ui("log", text=f"🚫 ACCOUNT BLOCK ({blk}) — stopping auto-post.")
+                    _ap_rests += 1
+                    if _ap_rests > AUTOPOST_MAX_RESTS:
+                        send_ui("log", text=f"🚫 Facebook still blocking after "
+                                            f"{AUTOPOST_MAX_RESTS} rests ({blk}) — stopping to "
+                                            f"protect the account. Solve any checkpoint and try later.")
+                        if _act:
+                            try: _act.alert(f"Auto-post: FB still blocking after "
+                                            f"{AUTOPOST_MAX_RESTS}×10min rests ({blk}) — stopped. "
+                                            f"Account may need a manual checkpoint fix.")
+                            except Exception: pass
+                        config["_end_reason"] = "account_blocked"
+                        stop_event.set()
+                        break
+                    _mins = AUTOPOST_REST_SEC // 60
+                    send_ui("log", text=f"🚫 Facebook limited posting ({blk}) — resting {_mins} min "
+                                        f"then retrying (rest {_ap_rests}/{AUTOPOST_MAX_RESTS}). "
+                                        f"Bot won't stop.")
                     if _act:
-                        try: _act.alert(f"ACCOUNT BLOCK during auto-post ({blk}) — stopped.")
+                        try: _act.alert(f"Auto-post: FB limited posting ({blk}) — resting "
+                                        f"{_mins} min then retrying ({_ap_rests}/{AUTOPOST_MAX_RESTS}).")
                         except Exception: pass
-                    config["_end_reason"] = "account_blocked"
-                    stop_event.set()
-                    break
+                    _e = time.time() + AUTOPOST_REST_SEC
+                    while time.time() < _e and not stop_event.is_set():
+                        await asyncio.sleep(5)
+                    if stop_event.is_set():
+                        break
+                    send_ui("log", text="   ↻ Rest done — retrying posting…")
+                    continue   # is group ko agli run retry; abhi aage se shuru
 
                 # ── 1 POST PER MINUTE pacing ──────────────────────
                 # Har post ke beech ~60 sec (chhoti jitter se robotic na lage).
@@ -5003,6 +5068,7 @@ async def _autopost_main(config):
                 res = await _post_to_group(page, msg, img)
                 if res in ("posted", "pending"):
                     done += 1
+                    _ap_rests = 0          # kamyaab post -> block-rest counter reset
                     _mark_posted(url)
                     send_ui("log", text=f"   ✅ [{i}/{len(urls)}] {res}: {gname}")
                 elif res == "disabled":
@@ -5029,11 +5095,24 @@ async def _autopost_main(config):
         except Exception:
             pass
 
-    send_ui("log", text=f"\n■ AUTO-POST DONE — posted {done}, skipped/failed {fails}.")
+    # Final message — stop ki WAJAH ke hisaab se (warna "DONE" dekh kar lagta
+    # hai sab ho gaya, jabke aksar FB ne account block/limit kar ke roka hota).
+    _blocked = config.get("_end_reason") == "account_blocked"
+    if _blocked:
+        _m = (f"\n🚫 AUTO-POST STOPPED by Facebook (account check / posting limit) — "
+              f"posted {done}, skipped/failed {fails}.  NOT finished — is account ko thodi "
+              f"der aaram do, phir Auto Post dobara chalao (jo ho chuke wo yaad hain, "
+              f"wahीn se aage barhega).")
+    elif stop_event.is_set():
+        _m = f"\n■ AUTO-POST STOPPED — posted {done}, skipped/failed {fails}."
+    else:
+        _m = (f"\n✅ AUTO-POST DONE (went through all groups) — posted {done}, "
+              f"skipped/failed {fails}.")
+    send_ui("log", text=_m)
     try:
         _a = config.get("_activity")
         if _a:
-            _a.alert(f"Auto-post run finished — posted {done}, skipped/failed {fails}.")
+            _a.alert(_m.strip())
     except Exception:
         pass
     send_ui("autopost_done")

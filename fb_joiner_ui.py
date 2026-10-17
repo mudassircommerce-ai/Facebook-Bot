@@ -153,7 +153,7 @@ def _update_watch_loop():
     # kyunki restart karne par bhi update apply nahi hoga.
     if getattr(sys, "frozen", False) or "--no-update" in sys.argv:
         return
-    time.sleep(20)                     # startup _self_update() ko pehle chalne do
+    time.sleep(25)                     # startup _self_update() ko pehle chalne do
     while True:
         try:
             import updater
@@ -161,9 +161,58 @@ def _update_watch_loop():
             with _UPD_LK:
                 _UPD.update(available=u["available"],
                             latest=u["latest"], current=u["current"])
+            if u.get("available"):
+                _apply_update_and_restart(u)   # MANDATORY: download + auto-restart
         except Exception:
             pass
-        time.sleep(1800)               # 30 min
+        time.sleep(600)                # 10 min
+
+
+def _apply_update_and_restart(u):
+    """Naya version mila -> download + bot ko rok kar process AUTO-RESTART.
+    Download FAIL ho to bot ko haath nahi lagate (chalta rehta hai; banner
+    dikhta hai; agli baar phir try). Restart-LOOP se bachao: check_and_apply
+    apply hone par .update_ver bump kar deta hai, is liye naye process mein
+    'available' dobara nahi aata. (joined_today disk par safe -> resume.)"""
+    import updater
+    try:
+        applied = updater.check_and_apply(getattr(lic, "UPDATE_URL", ""), HERE)
+    except Exception:
+        applied = False
+    if not applied:
+        return                         # download fail/na-change -> bot chalta rahe
+
+    _latest = u.get("latest")
+    _add_row(f"🔄 Update v{_latest} downloaded — restarting the bot now to apply it "
+             f"(today's progress is safe, it continues on its own).")
+    try:
+        import activity
+        emp = (lic.validate_key(lic.load_active_key(), check_url=False).get("employee") or "bot")
+        activity.send_alert(emp, f"🔄 Auto-update to v{_latest} — bot restarting itself.", sync=True)
+    except Exception:
+        pass
+
+    # chal raha bot gracefully rok do, phir chrome/locks saaf (clean restart)
+    try:
+        B.user_stop_event.set(); B.stop_event.set()
+        with _LK:
+            STATE["running"] = False; STATE["busy"] = False
+    except Exception:
+        pass
+    time.sleep(4)
+    try:
+        B._kill_stale_chrome_for_profile(); B._clear_profile_locks()
+    except Exception:
+        pass
+    time.sleep(1)
+
+    # naya process launch; kamyab ho tabhi exit (warna bot band reh jata)
+    try:
+        subprocess.Popen([sys.executable] + sys.argv, cwd=HERE, close_fds=True)
+    except Exception:
+        _add_row("⚠️ Auto-restart couldn't launch — close & reopen the bot to finish the update.")
+        return
+    os._exit(0)
 
 
 # ── license / settings helpers ─────────────────────────────
