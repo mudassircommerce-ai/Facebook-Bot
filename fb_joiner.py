@@ -4636,6 +4636,109 @@ async def _fetch_joined_group_ids(page) -> set:
     return ids
 
 
+async def _click_recently_joined_sort(page) -> bool:
+    """'Your groups' page par sort/filter ko 'Recently joined' par set karo.
+    FB sort-trigger kabhi current-sort ka naam dikhata hai ('Recent activity'
+    etc.), kabhi 'Sort'. Best-effort: trigger kholo, phir menu se 'Recently
+    joined' chuno. Mila+click -> True; warna False (caller default order hi
+    use karega, run rukta nahi)."""
+    # 1) trigger kholo (jo bhi sort/filter button mile)
+    opened = False
+    for sel in ('div[role="button"][aria-haspopup="menu"]:has-text("Recent activity")',
+                'div[role="button"][aria-haspopup="menu"]:has-text("Recently joined")',
+                'div[role="button"]:has-text("Recent activity")',
+                'div[role="button"]:has-text("Sort")',
+                'div[aria-label="Sort"]',
+                'div[aria-label*="Sort" i][role="button"]',
+                'span:has-text("Recent activity")'):
+        try:
+            b = page.locator(sel).first
+            if await b.count() and await b.is_visible(timeout=700):
+                await b.click()
+                await sleep(rand_delay(0.8, 1.6))
+                opened = True
+                break
+        except Exception:
+            continue
+    # 2) menu se 'Recently joined' chuno (trigger khula ya nahi — dono soorat
+    #    mein visible item try karo)
+    for sel in ('div[role="menuitemradio"]:has-text("Recently joined")',
+                'div[role="menuitem"]:has-text("Recently joined")',
+                '[role="menu"] div[role="button"]:has-text("Recently joined")',
+                '[role="menu"] span:has-text("Recently joined")',
+                'div[role="dialog"] span:has-text("Recently joined")'):
+        try:
+            mi = page.locator(sel).first
+            if await mi.count() and await mi.is_visible(timeout=900):
+                await mi.click()
+                await sleep(rand_delay(1.5, 2.5))
+                return True
+        except Exception:
+            continue
+    if opened:
+        try: await page.keyboard.press("Escape")
+        except Exception: pass
+    return False
+
+
+async def _fetch_recently_joined_urls(page) -> list:
+    """Account ki 'Your groups' (joined) list ko 'Recently joined' par sort
+    karke us ORDER mein group URLs nikalo (sab se naya-joined pehle). Har group
+    ko ek baar, DOM-tarteeb mein. Fail/empty -> khali list (caller CSV par
+    fall-back karega). URLs normalize: https://www.facebook.com/groups/<id>/ ."""
+    _NONID = {"feed", "joins", "create", "discover", "search", "category",
+              "your_groups_and_more", "requests", "notifications"}
+    order, seen = [], set()
+    for src in ("https://www.facebook.com/groups/joins/",
+                "https://www.facebook.com/groups/feed/"):
+        try:
+            await _goto_retry(page, src, timeout=25000, tries=2)
+            await sleep(3)
+            await dismiss_popups(page)
+        except Exception:
+            continue
+        sorted_ok = await _click_recently_joined_sort(page)
+        send_ui("log", text=("   ↳ 'Recently joined' sort applied."
+                             if sorted_ok else
+                             "   ↳ 'Recently joined' sort not found — using the "
+                             "list's default order."))
+        if sorted_ok:
+            await sleep(rand_delay(1.5, 2.5))
+        last, stable = 0, 0
+        for _ in range(60):           # scroll passes — badi list bhi load ho jaye
+            if stop_event.is_set():
+                break
+            try:
+                hrefs = await page.eval_on_selector_all(
+                    'a[href*="/groups/"]',
+                    "els => els.map(e => e.getAttribute('href') || '')")
+            except Exception:
+                hrefs = []
+            for h in hrefs or []:
+                m = re.search(r"/groups/([^/?#]+)", h or "")
+                if not m:
+                    continue
+                gid = m.group(1).lower()
+                if not gid or gid in _NONID or gid.startswith("?") or gid in seen:
+                    continue
+                seen.add(gid)
+                order.append(f"https://www.facebook.com/groups/{gid}/")
+            if len(order) == last:
+                stable += 1
+                if stable >= 4:        # 4 scroll tak koi naya nahi -> bas
+                    break
+            else:
+                stable, last = 0, len(order)
+            try:
+                await page.mouse.wheel(0, 3200)
+            except Exception:
+                pass
+            await sleep(rand_delay(1.2, 2.0))
+        if order:
+            break
+    return order
+
+
 async def _dismiss_group_gates(page):
     """Group kholte hi kabhi 'group rules' / 'Next' / 'Got it' / 'I agree'
     wale interstitials aate hain — unko click karke aage niklo."""
@@ -4842,13 +4945,12 @@ async def _autopost_main(config):
     msg   = config.get("post_message", "").strip()
     img   = config.get("post_image", "")
     send_ui("log", text="\n📢 Auto-post: launching browser…")
+    # Already-posted groups ko GROUP-ID se match karte hain (sirf poora-URL
+    # string se nahi) — taake live 'recently joined' list (jo normalized
+    # /groups/<id>/ deti hai) aur purane posted URLs sahi se match hon.
     posted_set = _load_posted()
-    urls = [u for u in _joined_group_urls() if u not in posted_set]
-    send_ui("log", text=f"   {len(urls)} groups to post in "
-                        f"({len(posted_set)} already done, skipped).")
-    if not urls:
-        send_ui("log", text="   Nothing to post — all joined groups already posted.")
-        send_ui("autopost_done"); return
+    posted_ids = {_group_id(u) for u in posted_set if _group_id(u)}
+    send_ui("log", text=f"   {len(posted_set)} group(s) already posted — unme dobara nahi hoga.")
 
     done = fails = 0
     try:
@@ -4885,36 +4987,29 @@ async def _autopost_main(config):
                 send_ui("log", text="❌ Not logged in — open the bot, log in, then retry.")
                 await ctx.close(); send_ui("autopost_done"); return
 
-            # ── Pehle account ki ASAL joined-groups list FB se nikalo ──────
-            # Phir sirf unhi groups par post karo (non-member/pending groups
-            # kholne ka waqt hi zaya nahi hota -> bahut tez + koi ghalat post
-            # nahi). List fetch fail/kam ho to purani list par fall-back
-            # (per-group 'Join Group' check phir bhi safety net hai).
-            send_ui("log", text="🔎 Reading the account's joined groups from Facebook…")
+            # ── Groups SOURCE: FB ki LIVE 'Your groups' list, 'Recently joined'
+            # par sort karke (sab se naya-joined pehle). Usi ORDER mein ek-ek
+            # karke post hota hai. Jahan pehle post ho chuka (posted_ids) wo
+            # skip. Live list fail/chhoti ho to hi purani CSV list par fall-back
+            # (per-group membership check waise bhi safety net hai).
+            send_ui("log", text="🔎 Opening 'Your groups' and sorting by 'Recently joined'…")
             try:
-                member_ids = await _fetch_joined_group_ids(page)
+                live_urls = await _fetch_recently_joined_urls(page)
             except Exception:
-                member_ids = set()
-            # NOTE: list se DROP nahi karte. Pehle "filter" karte the (sirf
-            # member_ids wale rakhte) — lekin FB ki IDs numeric hoti hain aur
-            # saved URLs bahut se SLUG, is liye match sirf 2-3 hota tha aur bot
-            # baaki asal members chhor kar "complete" keh deta tha (BUG). Ab:
-            # koi group hatao mat — sirf TARTEEB badlo (confirmed members pehle),
-            # baaki ke non-members ko per-group 'Join Group' check waise bhi skip
-            # kar deta hai. Is tarah SAARE joined groups cover hote hain.
-            if len(member_ids) >= 10:
-                _conf = [u for u in urls if _group_id(u) in member_ids]
-                _rest = [u for u in urls if _group_id(u) not in member_ids]
-                urls = _conf + _rest
-                send_ui("log", text=f"   ✅ {len(member_ids)} joined groups found on FB "
-                                    f"({len(_conf)} matched saved list) — posting to ALL "
-                                    f"{len(urls)} saved groups (confirmed members first).")
+                live_urls = []
+            if len(live_urls) >= 3:
+                urls = [u for u in live_urls if _group_id(u) not in posted_ids]
+                send_ui("log", text=f"   ✅ {len(live_urls)} joined groups read (recently-joined "
+                                    f"order) — {len(live_urls) - len(urls)} already posted, "
+                                    f"{len(urls)} to post.")
             else:
-                send_ui("log", text=f"   ℹ️ Joined-list read small/failed ({len(member_ids)}) — "
-                                    f"posting to all {len(urls)} saved groups "
-                                    f"(per-group membership check still applies).")
+                csv_urls = _joined_group_urls()
+                urls = [u for u in csv_urls if _group_id(u) not in posted_ids]
+                send_ui("log", text=f"   ℹ️ Live list small/failed ({len(live_urls)}) — falling back "
+                                    f"to the saved list: {len(urls)} to post "
+                                    f"({len(csv_urls)} joined, rest already posted).")
             if not urls:
-                send_ui("log", text="   Nothing to post — no joined groups left (all already posted).")
+                send_ui("log", text="   Nothing to post — all joined groups already posted.")
                 await ctx.close(); send_ui("autopost_done"); return
 
             plink = (config.get("page_link") or DEFAULT_PAGE_LINK).strip()
