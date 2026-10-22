@@ -89,6 +89,12 @@ _LAST_ACTIVITY      = time.monotonic()
 AUTOPOST_REST_SEC   = 600      # 10 min
 AUTOPOST_MAX_RESTS  = 6        # lagataar itne block ke baad hi stop
 
+# Auto-post batch rest: har itne KAMYAAB posts ke baad ek fixed rest, phir
+# wahीn se aage. (Muzammil: "har 25 groups mein post karne ke baad 10 min rest,
+# phir again aage se start.")
+AUTOPOST_POSTS_PER_REST  = 25
+AUTOPOST_BATCH_REST_SEC  = 600     # 10 min
+
 def _bump_activity():
     """Joining loop ne abhi kuch kiya — stall-watchdog ka timer reset."""
     global _LAST_ACTIVITY
@@ -573,6 +579,15 @@ def _kw_to_template(line: str) -> str:
     return k if "{area}" in k else "{area} " + k
 
 
+def _keyword_only(tmpl: str) -> str:
+    """Search template se '{area}' token nikaal do — sirf keyword bache.
+    Area ko FB ka LOCATION FILTER (apply_fb_filters) handle karta hai, isliye
+    query mein area nahi daalte.  '{area} community' -> 'community';
+    'Life in {area}' -> 'Life in';  '{area}' -> '' (khali = wording skip)."""
+    s = (tmpl or "").replace("{area}", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def default_search_keyword_lines() -> list:
     """Default do-join keywords (raw lines):  keywords.txt > code ki list.
     UI box isi se pre-fill hota hai, taake har employee ko ye pehle se
@@ -590,17 +605,23 @@ def default_search_keyword_lines() -> list:
 
 
 def resolve_search_keywords(ui_val: str = "") -> list:
-    """Search wordings:  UI box  >  keywords.txt  >  built-in SEARCH_TEMPLATES.
+    """Search wordings ka ORDER:  built-in SEARCH_TEMPLATES PEHLE, phir
+    employee ki keywords (UI box, warna keywords.txt / DEFAULT list).
 
-    Employee ke apne keywords SAB SE PEHLE try hote hain, built-in list
-    uske baad — taake unke diye hue keywords pehle chalein aur coverage
-    bhi kam na ho. (Pehle apne keywords dene ka koi raasta hi nahi tha:
-    saari queries 101 hardcoded wordings se banti thin.)
+    Yani bot pehle apni built-in wordings par chalta hai; jab un se groups
+    khatam ho jayein to employee ki di hui keywords par jata hai. (Pehle ulta
+    tha — user keywords pehle — Muzammil ne order badalne ko kaha.)
     """
     raw = ui_val or ""
     if not raw.strip():
         raw = "\n".join(default_search_keyword_lines())
-    user, seen = [], set()
+    seen = set()
+    builtin = []
+    for t in SEARCH_TEMPLATES:               # built-in wordings pehle
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            builtin.append(t)
+    user = []                                # phir employee ki keywords
     for ln in raw.splitlines():
         ln = ln.strip()
         if not ln or ln.startswith("#"):
@@ -609,9 +630,7 @@ def resolve_search_keywords(ui_val: str = "") -> list:
         if t and t.lower() not in seen:
             seen.add(t.lower())
             user.append(t)
-    if not user:
-        return list(SEARCH_TEMPLATES)
-    return user + [t for t in SEARCH_TEMPLATES if t.lower() not in seen]
+    return builtin + user
 
 
 def resolve_gemini_keys(ui_val: str = "") -> list:
@@ -2149,13 +2168,19 @@ async def get_group_info(page):
     text  = await page.inner_text("body")
     gname = _extract_group_name(html, text)
     members = 0
-    for pat in [r'([\d,]+\.?\d*[KkMm]?)\s*[Mm]embers?', r'"memberCount":([\d]+)']:
+    for pat in [r'([\d,]+\.?\d*[KkMm]?)\s*[Mm]embers?', r'"memberCount":([\d]+)',
+                r'"member_count":([\d]+)', r'"group_total_members":([\d]+)']:
         m = re.search(pat, html)
         if m:
             # _parse_count khali/ajeeb string pe crash nahi karta, 0 deta hai
             members = _parse_count(m.group(1))
             if members:
                 break
+    if not members:
+        # HTML se na mila -> rendered text par try (singular "1 member" bhi)
+        m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members?\b', text or "", re.I)
+        if m:
+            members = _parse_count(m.group(1))
     privacy     = "Private" if "Private group" in text else "Public" if "Public group" in text else "Unknown"
     already     = any(x in text for x in ["Leave group","Joined","Member ·","You're a member"])
     page_blocked = "doesn't allow Pages to join" in text or "does not allow Pages to join" in text
@@ -3374,9 +3399,16 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
                 already_joined.add(url)
             return "skipped"
 
+        # Min members: ab UNKNOWN/0 count bhi SKIP hota hai (safe taraf) —
+        # taake 1-member / count-na-padhne wale groups join na hon. (Pehle
+        # 'members > 0' ki shart thi, isliye count na padhne par group join ho
+        # jata tha — yahi "1 member wale group bhi join" wala bug tha.)
         _min_req = _min_members_for(config, privacy)
-        if members > 0 and members < _min_req:
-            send_ui("log", text=f"⏭️  Skip ({members} {privacy.lower()} members < {_min_req}): {name}")
+        if _min_req > 0 and members < _min_req:
+            _why = (f"{members} {privacy.lower()} members < {_min_req}"
+                    if members > 0 else
+                    f"member count unreadable — skipping (min {_min_req})")
+            send_ui("log", text=f"⏭️  Skip ({_why}): {name}")
             log_csv(area, name, url, "low_members", members, privacy)
             return "skipped"
 
@@ -3487,20 +3519,33 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
 
     send_ui("target", text=city)
 
-    # Pura target (city + state, ya county + state) se search — sirf city
-    # naam se search karna galat results deta tha
-    # query_variant=0 -> bare area naam (pehle jaisa). 1+ -> SEARCH_TEMPLATES
-    # se alag wording — FB ka search result-set query ke hisaab se badalta
-    # hai, isliye alag wording = naye groups discover hote hain (khaas kar
-    # chhote/hyperlocal groups jo bare naam se top results mein nahi aate).
     _tmpls = config.get("_search_templates") or SEARCH_TEMPLATES
-    if query_variant and _tmpls:
-        tmpl  = _tmpls[(query_variant - 1) % len(_tmpls)]
-        query = tmpl.format(area=city)
+    _mode_q = (config.get("business_mode") or "car").lower()
+    if _mode_q == "duct_test":
+        # Duct Test: koi location filter nahi (neeche skip hota hai) — isliye
+        # AREA ko QUERY mein hi rakhna zaroori hai (warna search global ho
+        # jaye). Purana tareeqa: variant 0 = bare area, 1+ = wording+area.
+        if query_variant and _tmpls:
+            tmpl  = _tmpls[(query_variant - 1) % len(_tmpls)]
+            query = tmpl.format(area=city)
+        else:
+            query = city
+        send_ui("log", text=f"🔍 Searching: '{query}'")
     else:
-        query = city
+        # KEYWORD-ONLY search:  query mein SIRF keyword jata hai ("community",
+        # "car detailing"…), AREA nahi — area/state+city ko neeche wala
+        # apply_fb_filters (FB ka location filter) handle karta hai. Pehle
+        # query mein area bhi ghusta tha ("community {area}" -> "community
+        # Raleigh NC") jo ghalat tha. Har query_variant ek wording (0-based).
+        # Purana "bare area naam" pass hata diya — location filter waise bhi
+        # area scope kar deta hai, 'community' jaisi wording local groups laati.
+        tmpl  = _tmpls[query_variant % len(_tmpls)] if _tmpls else "{area}"
+        query = _keyword_only(tmpl)
+        if not query:
+            # pure-"{area}" wording -> koi keyword nahi bacha, ise chhod do
+            return joined, skipped
+        send_ui("log", text=f"🔍 Searching: '{query}'  (location filter: {city})")
     url   = f"https://www.facebook.com/search/groups/?q={query.replace(' ','%20')}"
-    send_ui("log", text=f"🔍 Searching: '{query}'")
 
     try:
         await _goto_retry(page, url, timeout=20000, tries=2)
@@ -3602,9 +3647,13 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         card_privacy = "Private" if "Private" in (card_txt or "") else "Public" if "Public" in (card_txt or "") else "?"
         # Card par member count likha hota hai — chhota group yahin chhoro,
         # page kholne ki zaroorat hi nahi (~20 sec per group bachta hai)
-        m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members', card_txt or "", re.I)
-        card_members = _parse_count(m.group(1)) if m else 0
-        if 0 < card_members < _min_members_for(config, card_privacy):
+        # Card par member count ("12K members" / "1 member"). Singular "member"
+        # bhi match karo (chhote/1-member groups yahin pakdo). Count NA mile to
+        # card_members = -1 (unknown) -> card par skip MAT karo, group khol ke
+        # in-page check faisla karega (wahan unknown bhi skip hota hai).
+        m = re.search(r'([\d.,]+\s*[KkMm]?)\s*members?\b', card_txt or "", re.I)
+        card_members = _parse_count(m.group(1)) if m else -1
+        if 0 <= card_members < _min_members_for(config, card_privacy):
             log_csv(city, name, clean, "low_members", card_members, card_privacy)
             skipped += 1
             pre_skipped += 1
@@ -4263,7 +4312,7 @@ async def playwright_main(config):
                 # (isi liye area "bohot jaldi pura" ho jata tha); baaki
                 # 100 wordings agle rounds ke liye reh jati thin, jo aksar
                 # aate hi nahi the.
-                _variant = _round - 1        # round 1 -> bare area naam
+                _variant = _round - 1        # round 1 -> pehli wording (index 0)
                 _empty_streak = 0
                 _wordings = 0
                 while not stop_event.is_set() and joined_today < limit:
@@ -4294,7 +4343,7 @@ async def playwright_main(config):
                         if _empty_streak >= AREA_EMPTY_WORDINGS:
                             break
                     _variant += 1
-                    if _variant > len(config.get("_search_templates") or SEARCH_TEMPLATES):
+                    if _variant >= len(config.get("_search_templates") or SEARCH_TEMPLATES):
                         break
                     random.shuffle(targets)
 
@@ -4637,39 +4686,99 @@ async def _fetch_joined_group_ids(page) -> set:
 
 
 async def _click_recently_joined_sort(page) -> bool:
-    """'Your groups' page par sort/filter ko 'Recently joined' par set karo.
-    FB sort-trigger kabhi current-sort ka naam dikhata hai ('Recent activity'
-    etc.), kabhi 'Sort'. Best-effort: trigger kholo, phir menu se 'Recently
-    joined' chuno. Mila+click -> True; warna False (caller default order hi
-    use karega, run rukta nahi)."""
-    # 1) trigger kholo (jo bhi sort/filter button mile)
-    opened = False
-    for sel in ('div[role="button"][aria-haspopup="menu"]:has-text("Recent activity")',
-                'div[role="button"][aria-haspopup="menu"]:has-text("Recently joined")',
-                'div[role="button"]:has-text("Recent activity")',
-                'div[role="button"]:has-text("Sort")',
-                'div[aria-label="Sort"]',
-                'div[aria-label*="Sort" i][role="button"]',
-                'span:has-text("Recent activity")'):
+    """'All groups you've joined' section ke 'Sort' ko 'Recently joined first'
+    par set karo (UI screenshot se confirmed). Steps: section header ko view
+    mein lao -> uske saamne 'Sort' click -> menu se 'Recently joined first'
+    click. Mila -> True; warna False (caller default order use karega, run
+    rukta nahi)."""
+    # 1) SCROLL karke "All groups you've joined (N)" section tak pahुncho.
+    #    Ye section page mein NEECHE hota hai (upar 'Requested to join' etc.)
+    #    aur FB ise lazy-load karta hai — isliye jab tak scroll na karo, 'Sort'
+    #    DOM mein aata hi nahi (yehi wajah thi ke bot 'Sort' dhoond nahi pata
+    #    tha). User manually Ctrl+F "All groups you've joined" karke wahan jump
+    #    karta hai — hum scroll karke dhoondte hain. Mil jaye to header ke
+    #    aas-paas wale "Sort" ko JS se tag kar dete hain (sahi wala, kisi aur
+    #    "Sort" se confusion na ho).
+    found = False
+    for _ in range(30):
         try:
-            b = page.locator(sel).first
-            if await b.count() and await b.is_visible(timeout=700):
-                await b.click()
-                await sleep(rand_delay(0.8, 1.6))
-                opened = True
-                break
+            tag = await page.evaluate(r"""
+                () => {
+                  const ok = t => t && /all groups you.?ve joined/i.test(t);
+                  const nodes=[...document.querySelectorAll('span,h2,h3,div,a')];
+                  const hdr=nodes.find(n=>{const t=(n.textContent||'').trim();
+                                          return ok(t) && t.length<60;});
+                  if(!hdr) return 'no';
+                  hdr.scrollIntoView({block:'center'});
+                  let box=hdr; for(let i=0;i<6 && box.parentElement;i++) box=box.parentElement;
+                  document.querySelectorAll('[data-fbj-sort]').forEach(e=>e.removeAttribute('data-fbj-sort'));
+                  const cand=[...box.querySelectorAll('span,div,a,[role=button]')]
+                     .find(e=>((e.textContent||'').trim().toLowerCase()==='sort'));
+                  if(cand){ cand.setAttribute('data-fbj-sort','1'); return 'sort'; }
+                  return 'hdr';
+                }
+            """)
         except Exception:
-            continue
-    # 2) menu se 'Recently joined' chuno (trigger khula ya nahi — dono soorat
-    #    mein visible item try karo)
+            tag = 'no'
+        if tag in ('sort', 'hdr'):
+            found = True
+            break
+        try: await page.keyboard.press("End")
+        except Exception: pass
+        try: await page.mouse.wheel(0, 3000)
+        except Exception: pass
+        await sleep(rand_delay(0.8, 1.4))
+    if not found:
+        # Header text nahi mila — phir bhi aage direct "Sort" text/opener try
+        # karenge (purana tareeqa), tabhi sort fail maanenge. (Strict return
+        # nahi, warna jo pehle kaam kar raha tha woh toot jata.)
+        send_ui("log", text="   ↳ section header na mila — direct 'Sort' try kar raha…")
+    await sleep(rand_delay(0.6, 1.1))
+
+    # 2) 'Sort' click — pehle JS-tagged (header ke bilkul paas wala), warna
+    #    text se chhota "Sort" label (poore paragraph wala nahi).
+    opened = False
+    try:
+        st = page.locator('[data-fbj-sort="1"]').first
+        if await st.count() and await st.is_visible(timeout=1200):
+            await st.click()
+            await sleep(rand_delay(0.8, 1.6))
+            opened = True
+    except Exception:
+        pass
+    if not opened:
+        for sel in ('div[role="button"]:has-text("Sort")',
+                    'a[role="link"]:has-text("Sort")',
+                    'span:has-text("Sort")',
+                    '[aria-label="Sort"]'):
+            try:
+                loc = page.locator(sel)
+                for i in range(min(await loc.count(), 6)):
+                    b = loc.nth(i)
+                    try:
+                        t = (await b.inner_text(timeout=400)).strip().lower()
+                    except Exception:
+                        continue
+                    if t == "sort" and await b.is_visible():
+                        await b.click()
+                        await sleep(rand_delay(0.8, 1.6))
+                        opened = True
+                        break
+                if opened:
+                    break
+            except Exception:
+                continue
+
+    # 3) menu se 'Recently joined first' chuno (has-text substring 'Recently
+    #    joined' bhi 'Recently joined first' par lag jata hai)
     for sel in ('div[role="menuitemradio"]:has-text("Recently joined")',
                 'div[role="menuitem"]:has-text("Recently joined")',
-                '[role="menu"] div[role="button"]:has-text("Recently joined")',
-                '[role="menu"] span:has-text("Recently joined")',
-                'div[role="dialog"] span:has-text("Recently joined")'):
+                '[role="menu"] :has-text("Recently joined first")',
+                'span:has-text("Recently joined first")',
+                'span:has-text("Recently joined")'):
         try:
             mi = page.locator(sel).first
-            if await mi.count() and await mi.is_visible(timeout=900):
+            if await mi.count() and await mi.is_visible(timeout=1200):
                 await mi.click()
                 await sleep(rand_delay(1.5, 2.5))
                 return True
@@ -5020,6 +5129,7 @@ async def _autopost_main(config):
             _act = config.get("_activity")
             _last_post_at = 0.0          # 1 post/min pacing ke liye
             _ap_rests = 0                # lagataar FB-block rests (success par 0)
+            _since_rest = 0              # is batch mein ab tak kamyaab posts (25 par rest)
             for i, url in enumerate(urls, 1):
                 if stop_event.is_set():
                     break
@@ -5164,8 +5274,27 @@ async def _autopost_main(config):
                 if res in ("posted", "pending"):
                     done += 1
                     _ap_rests = 0          # kamyaab post -> block-rest counter reset
+                    _since_rest += 1
                     _mark_posted(url)
                     send_ui("log", text=f"   ✅ [{i}/{len(urls)}] {res}: {gname}")
+                    # Har 25 kamyaab posts ke baad 10 min rest, phir wahीn se aage
+                    if (_since_rest >= AUTOPOST_POSTS_PER_REST
+                            and not stop_event.is_set() and i < len(urls)):
+                        _since_rest = 0
+                        _mins = AUTOPOST_BATCH_REST_SEC // 60
+                        send_ui("log", text=f"   💤 {AUTOPOST_POSTS_PER_REST} posts done — "
+                                            f"resting {_mins} min, then continuing from here…")
+                        if _act:
+                            try: _act.alert(f"Auto-post: {AUTOPOST_POSTS_PER_REST} posts done "
+                                            f"— {_mins} min rest, phir aage.")
+                            except Exception: pass
+                        _re = time.time() + AUTOPOST_BATCH_REST_SEC
+                        while time.time() < _re and not stop_event.is_set():
+                            await asyncio.sleep(5)
+                        if stop_event.is_set():
+                            break
+                        send_ui("log", text="   ↻ Rest done — resuming posting…")
+                        _last_post_at = 0.0     # rest ke baad pacing fresh
                 elif res == "disabled":
                     fails += 1
                     _mark_posted(url)     # is group mein members post nahi kar sakte — dobara mat try
