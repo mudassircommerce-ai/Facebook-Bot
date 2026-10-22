@@ -4818,9 +4818,23 @@ async def _fetch_recently_joined_urls(page) -> list:
             if stop_event.is_set():
                 break
             try:
-                hrefs = await page.eval_on_selector_all(
-                    'a[href*="/groups/"]',
-                    "els => els.map(e => e.getAttribute('href') || '')")
+                hrefs = await page.evaluate(r"""
+                    () => {
+                      const ok = t => t && /all groups you.?ve joined/i.test(t);
+                      const nodes=[...document.querySelectorAll('span,h2,h3,div,a')];
+                      const hdr=nodes.find(n=>{const t=(n.textContent||'').trim();
+                                              return ok(t) && t.length<60;});
+                      const all=[...document.querySelectorAll('a[href*="/groups/"]')];
+                      // SIRF "All groups you've joined" header ke BAAD wale links lo.
+                      // 'Requested to join' (jin groups ka join-request abhi admin ne
+                      // approve nahi kia) wala section header se UPAR hota hai, is liye
+                      // woh groups list mein aate hi nahi. Header na mile -> sab (fallback).
+                      const take = hdr
+                        ? all.filter(a => hdr.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING)
+                        : all;
+                      return take.map(a => a.getAttribute('href') || '');
+                    }
+                """)
             except Exception:
                 hrefs = []
             for h in hrefs or []:
