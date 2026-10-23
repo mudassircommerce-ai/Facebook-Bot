@@ -3531,20 +3531,25 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         else:
             query = city
         send_ui("log", text=f"🔍 Searching: '{query}'")
+    elif query_variant == 0:
+        # NORMAL tareeqa (sab se pehle): plain AREA naam se search + location
+        # filter. Muzammil: "pehle apne normal tareeqe se joining karo, phir
+        # jab area khatam lage TAB keywords/wordings par jao." Isliye pehli pass
+        # bare area hoti hai, keywords/wordings uske baad (variant 1+).
+        query = city
+        send_ui("log", text=f"🔍 Searching: '{query}'  (normal — area)")
     else:
-        # KEYWORD-ONLY search:  query mein SIRF keyword jata hai ("community",
-        # "car detailing"…), AREA nahi — area/state+city ko neeche wala
-        # apply_fb_filters (FB ka location filter) handle karta hai. Pehle
-        # query mein area bhi ghusta tha ("community {area}" -> "community
-        # Raleigh NC") jo ghalat tha. Har query_variant ek wording (0-based).
-        # Purana "bare area naam" pass hata diya — location filter waise bhi
-        # area scope kar deta hai, 'community' jaisi wording local groups laati.
-        tmpl  = _tmpls[query_variant % len(_tmpls)] if _tmpls else "{area}"
+        # Uske baad: KEYWORD-ONLY wordings — query mein SIRF keyword
+        # ("community", "car detailing"…), AREA nahi; area/state+city ko
+        # apply_fb_filters (location filter) handle karta hai. Wordings ka
+        # order: pehle built-in, phir employee ki keywords.txt (resolve_search_
+        # keywords). variant 1 -> wording[0], variant 2 -> wording[1]…
+        tmpl  = _tmpls[(query_variant - 1) % len(_tmpls)] if _tmpls else "{area}"
         query = _keyword_only(tmpl)
         if not query:
             # pure-"{area}" wording -> koi keyword nahi bacha, ise chhod do
             return joined, skipped
-        send_ui("log", text=f"🔍 Searching: '{query}'  (location filter: {city})")
+        send_ui("log", text=f"🔍 Searching: '{query}'  (keyword — location filter: {city})")
     url   = f"https://www.facebook.com/search/groups/?q={query.replace(' ','%20')}"
 
     try:
@@ -4312,7 +4317,7 @@ async def playwright_main(config):
                 # (isi liye area "bohot jaldi pura" ho jata tha); baaki
                 # 100 wordings agle rounds ke liye reh jati thin, jo aksar
                 # aate hi nahi the.
-                _variant = _round - 1        # round 1 -> pehli wording (index 0)
+                _variant = _round - 1        # round 1 -> variant 0 = bare area (normal)
                 _empty_streak = 0
                 _wordings = 0
                 while not stop_event.is_set() and joined_today < limit:
@@ -4343,7 +4348,7 @@ async def playwright_main(config):
                         if _empty_streak >= AREA_EMPTY_WORDINGS:
                             break
                     _variant += 1
-                    if _variant >= len(config.get("_search_templates") or SEARCH_TEMPLATES):
+                    if _variant > len(config.get("_search_templates") or SEARCH_TEMPLATES):
                         break
                     random.shuffle(targets)
 
