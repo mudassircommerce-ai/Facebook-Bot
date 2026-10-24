@@ -3531,25 +3531,14 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         else:
             query = city
         send_ui("log", text=f"🔍 Searching: '{query}'")
-    elif query_variant == 0:
-        # NORMAL tareeqa (sab se pehle): plain AREA naam se search + location
-        # filter. Muzammil: "pehle apne normal tareeqe se joining karo, phir
-        # jab area khatam lage TAB keywords/wordings par jao." Isliye pehli pass
-        # bare area hoti hai, keywords/wordings uske baad (variant 1+).
-        query = city
-        send_ui("log", text=f"🔍 Searching: '{query}'  (normal — area)")
     else:
-        # Uske baad: KEYWORD-ONLY wordings — query mein SIRF keyword
-        # ("community", "car detailing"…), AREA nahi; area/state+city ko
-        # apply_fb_filters (location filter) handle karta hai. Wordings ka
-        # order: pehle built-in, phir employee ki keywords.txt (resolve_search_
-        # keywords). variant 1 -> wording[0], variant 2 -> wording[1]…
-        tmpl  = _tmpls[(query_variant - 1) % len(_tmpls)] if _tmpls else "{area}"
-        query = _keyword_only(tmpl)
-        if not query:
-            # pure-"{area}" wording -> koi keyword nahi bacha, ise chhod do
-            return joined, skipped
-        send_ui("log", text=f"🔍 Searching: '{query}'  (keyword — location filter: {city})")
+        # SIRF city/area se joining — KEYWORD/wording system HATA diya gaya
+        # (Muzammil: "city/area se joining wohi rakh, keywords wala system hata
+        # de"). Har search = plain AREA naam + location filter (apply_fb_filters).
+        # Koi "neighborhood"/"community" wali wording nahi. Ek area ke groups
+        # ho jaayein to bot agle area/city par chala jata hai.
+        query = city
+        send_ui("log", text=f"🔍 Searching: '{query}'  (area)")
     url   = f"https://www.facebook.com/search/groups/?q={query.replace(' ','%20')}"
 
     try:
@@ -4342,11 +4331,17 @@ async def playwright_main(config):
                     _got = joined_today - _before
                     if _got:
                         _empty_streak = 0
-                        send_ui("log", text=f"      ↳ wording {_variant}: +{_got} groups")
+                        send_ui("log", text=f"      ↳ +{_got} groups this pass")
                     else:
                         _empty_streak += 1
-                        if _empty_streak >= AREA_EMPTY_WORDINGS:
-                            break
+                    # KEYWORDS/wording system HATA diya (non-duct_test): har area
+                    # par SIRF ek area-search pass, phir seedha agle area/city par.
+                    # (Naye groups ke liye bot baad ke rounds mein dobara aata hai.)
+                    if _mode != "duct_test":
+                        break
+                    # Duct Test (admin-only): purana wording-iteration barqarar.
+                    if _empty_streak >= AREA_EMPTY_WORDINGS:
+                        break
                     _variant += 1
                     if _variant > len(config.get("_search_templates") or SEARCH_TEMPLATES):
                         break
@@ -4354,7 +4349,7 @@ async def playwright_main(config):
 
                 area_joined = joined_today - area_joined_start
                 send_ui("log", text=f"   ✅ Area '{area}' done: +{area_joined} groups "
-                                    f"({_wordings} wording(s) tried)")
+                                    f"({_wordings} pass(es))")
 
             # Poora pass khatam - is pass mein kuch mila?
             if joined_today - _round_start == 0:
