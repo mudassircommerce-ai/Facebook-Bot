@@ -216,11 +216,15 @@ def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
     else:
         raise ValueError("Provide one of: 'exp', 'hours' or 'days'")
 
+    # iat ko 1 din PEECHE rakho (clock-skew / timezone buffer). Warna jis PC ki
+    # ghadi server se thodi peeche ho wahan key "not valid yet (starts …)" de
+    # deti thi. Backdate se key foran valid rehti hai; exp par koi asar nahi.
+    iat_dt = now - timedelta(days=1)
     payload = {
         "v": 1,
         "emp": employee.strip(),
         "kid": "K-" + now.strftime("%Y%m%d") + "-" + secrets.token_hex(3).upper(),
-        "iat": now.isoformat(timespec="seconds"),
+        "iat": iat_dt.isoformat(timespec="seconds"),
         "exp": exp_dt.replace(microsecond=0).isoformat(timespec="seconds"),
         "mid": machine.strip(),
     }
@@ -387,9 +391,12 @@ def validate_key(key_str: str, enforce_machine: bool = True,
         except Exception:
             pass
 
-    if now < iat_dt:
-        out["error"] = f"Key is not valid yet (starts {pl['iat']})"
-        return out
+    # NOTE: "not valid yet" (iat/nbf) check HATA diya gaya. Keys hamesha foran
+    # use ke liye banti hain (koi future-start use-case nahi), aur jin employee
+    # PCs ki ghadi/date peeche set hoti thi wahan yeh check legit keys ko
+    # "Key is not valid yet (starts …)" keh kar block kar deta tha. Ab key sirf
+    # EXPIRY aur SIGNATURE par reject hoti hai. (Clock-rollback check upar
+    # barqarar hai — woh last-seen se aage ki guard hai.)
 
     secs = (exp_dt - now).total_seconds()
     out["secs_left"] = int(secs)

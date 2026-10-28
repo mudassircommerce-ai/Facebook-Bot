@@ -5006,19 +5006,30 @@ async def _post_to_group(page, message: str, image_path: str) -> str:
             except Exception: pass
             return "nocomposer"
 
-        # 3) type message
+        # 3) type message — PARAGRAPH/line breaks barqarar rakho. Pehle poora
+        #    text ek saath execCommand('insertText') se daalte the, jo FB ke
+        #    composer mein saare newlines kha jata tha -> 2 paragraph mila kar
+        #    ek ban jate the. Ab: har line ka text insert karo aur lines ke
+        #    beech asli ENTER press karo (composer mein Enter = nayi line, post
+        #    submit NAHI karta). Khali line (double \n) = paragraph gap bhi rehta.
         await box.click()
         await sleep(0.5)
         typed = False
         try:
-            await box.evaluate("(el, t) => { el.focus(); "
-                               "document.execCommand('insertText', false, t); }", message)
+            _lines = (message or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            for _i, _ln in enumerate(_lines):
+                if _i > 0:
+                    await page.keyboard.press("Enter")
+                    await sleep(0.05)
+                if _ln:
+                    await box.evaluate("(el, t) => document.execCommand('insertText', false, t)", _ln)
             typed = bool((await box.inner_text() or "").strip())
         except Exception:
             typed = False
         if not typed:
+            # fallback: seedha type (Playwright \n ko Enter bhej deta hai)
             try:
-                await box.type(message[:800], delay=5)
+                await box.type(message[:1000], delay=5)
             except Exception:
                 pass
         await sleep(rand_delay(1.5, 2.5))
