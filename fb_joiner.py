@@ -95,6 +95,13 @@ AUTOPOST_MAX_RESTS  = 6        # lagataar itne block ke baad hi stop
 AUTOPOST_POSTS_PER_REST  = 25
 AUTOPOST_BATCH_REST_SEC  = 600     # 10 min
 
+# Human-like joining: itne joins ke baad ek lamba "rest" (insaan non-stop nahi
+# karta), aur join ke beech kabhi-kabhi thoda feed-scroll (sirf-join-sirf-join
+# bot-signature na bane). Ban-risk kam karne ke liye.
+JOIN_BURST_SIZE      = 10
+JOIN_BURST_REST_MIN  = 15 * 60     # 15 min
+JOIN_BURST_REST_MAX  = 20 * 60     # 20 min
+
 def _bump_activity():
     """Joining loop ne abhi kuch kiya — stall-watchdog ka timer reset."""
     global _LAST_ACTIVITY
@@ -3721,9 +3728,36 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         # hai — group ka page dekhna aam browsing hai. Isliye join ke baad
         # poora delay (Delay Min/Max), skip ke baad chhota sa.
         if status == "joined":
-            wait = rand_delay(config["delay_min"], config["delay_max"])
+            # Ban se bachne ke liye join ke baad ka rest DOUBLE kar diya gaya
+            # (Muzammil). Jo bhi Delay Min/Max set ho, bot uska 2x rukta hai.
+            wait = 2 * rand_delay(config["delay_min"], config["delay_max"])
             send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
             await sleep(wait)
+            # ── HUMAN-LIKE behavior ──────────────────────────────
+            # Kabhi-kabhi thoda feed/page scroll (sirf-join-sirf-join robotic
+            # lagta hai). ~30% waqt.
+            if random.random() < 0.30:
+                try:
+                    for _ in range(random.randint(2, 4)):
+                        await page.mouse.wheel(0, random.randint(500, 1500))
+                        await sleep(rand_delay(0.8, 2.0))
+                    if random.random() < 0.4:
+                        await page.mouse.wheel(0, -random.randint(300, 800))
+                        await sleep(rand_delay(0.6, 1.5))
+                except Exception:
+                    pass
+            # Har JOIN_BURST_SIZE joins ke baad ek lamba break (insaan non-stop
+            # nahi karta) -> ban-risk kam.
+            config["_joins_since_break"] = config.get("_joins_since_break", 0) + 1
+            if config["_joins_since_break"] >= JOIN_BURST_SIZE:
+                config["_joins_since_break"] = 0
+                _br = rand_delay(JOIN_BURST_REST_MIN, JOIN_BURST_REST_MAX)
+                send_ui("log", text=f"   😴 Human break: {JOIN_BURST_SIZE} joins done — "
+                                    f"resting ~{int(_br // 60)} min, then continuing…")
+                _bend = time.time() + _br
+                while time.time() < _bend and not stop_event.is_set():
+                    await asyncio.sleep(5)
+                    _bump_activity()
         else:
             await sleep(rand_delay(1.5, 3.5))
 
@@ -4362,7 +4396,7 @@ async def playwright_main(config):
                     _wait = 15 * 60
                     send_ui("log", text=f"\n🛡 Safe Mode: no new groups "
                                         f"this pass — resting 15 min, then "
-                                        f"re-scanning all duct areas. Bot stays on.")
+                                        f"re-scanning all areas. Bot stays on.")
                     _end = time.time() + _wait
                     while time.time() < _end and not stop_event.is_set():
                         time.sleep(3)
@@ -4549,7 +4583,7 @@ def run_login_browser():
         hint = _launch_error_hint(e)
         if hint:
             send_ui("log", text=f"💡 {hint}")
-        send_ui("log", text=f"   (poori detail: error_log{SUFFIX}.txt)")
+        send_ui("log", text=f"   (full details: error_log{SUFFIX}.txt)")
         send_ui("login_done")
 
 
@@ -4598,6 +4632,155 @@ def run_logout_browser():
     except Exception as e:
         send_ui("log", text=f"logout error: {str(e)[:80]}")
         send_ui("logout_done")
+
+
+# ── Auto-scroll: Facebook feed ko 10–15 min human-jaisa scroll (warm-up) ─────
+async def _autoscroll_main(mins_min: float = 10, mins_max: float = 15):
+    """Login ke baad is profile ki FB feed ko ~10–15 min tak insaan-jaisa scroll
+    karo (warm-up / natural activity) — ban-risk kam. STOP se foran ruk jata hai."""
+    dur = random.uniform(mins_min * 60, mins_max * 60)
+    send_ui("log", text=f"🧭 Auto-scroll: Facebook feed ~{int(dur // 60)} min "
+                        f"(human-like). STOP will stop it.")
+    try:
+        async with async_playwright() as p:
+            ctx = await _launch_ctx(p, headless=False,
+                                    viewport={"width": 1366, "height": 768},
+                                    extra_args=["--start-maximized"])
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            try:
+                await page.goto("https://www.facebook.com", wait_until="domcontentloaded",
+                                timeout=25000)
+                await sleep(3)
+                await dismiss_popups(page)
+            except Exception:
+                pass
+            if await page.locator('[role="navigation"]').count() == 0:
+                send_ui("log", text="❌ Not logged in — log in to Facebook first, then Auto-scroll.")
+                await ctx.close(); send_ui("autoscroll_done"); return
+            _end = time.time() + dur
+            while time.time() < _end and not stop_event.is_set():
+                try:
+                    await page.mouse.wheel(0, random.randint(400, 1600))   # neeche
+                    await sleep(rand_delay(1.5, 4.5))
+                    if random.random() < 0.15:                              # kabhi upar
+                        await page.mouse.wheel(0, -random.randint(200, 700))
+                        await sleep(rand_delay(1.0, 2.5))
+                    if random.random() < 0.08:                             # kabhi ruk ke "padho"
+                        await sleep(rand_delay(4, 9))
+                    _bump_activity()
+                except Exception:
+                    break
+            try: await ctx.close()
+            except Exception: pass
+        send_ui("log", text="✅ Auto-scroll done — browsed the feed in a human-like way.")
+    except Exception as e:
+        log_error("autoscroll failed", e)
+        send_ui("log", text=f"❌ Auto-scroll failed: {str(e)[:200]}")
+        _h = _launch_error_hint(e)
+        if _h: send_ui("log", text=f"💡 {_h}")
+    send_ui("autoscroll_done")
+
+
+def run_autoscroll():
+    try:
+        asyncio.run(_autoscroll_main())
+    except Exception as e:
+        log_error("autoscroll failed", e)
+        send_ui("log", text=f"auto-scroll error: {str(e)[:120]}")
+        send_ui("autoscroll_done")
+
+
+# ── Create Facebook account: signup page isi profile mein kholo ──────────────
+async def _create_account_main():
+    """Facebook 'Create account' page is profile ke browser mein kholo — banda
+    yahीn naya account bana le; uska session isi profile (pw_profile) mein save
+    ho jata hai (jaise account 1 = profile 1). Window band karne par ho gaya."""
+    async with async_playwright() as p:
+        send_ui("log", text="🆕 Opening Facebook 'Create account' page…")
+        ctx = await _launch_ctx(p, headless=False, viewport={"width": 1366, "height": 768},
+                               extra_args=["--start-maximized"])
+        closed = {"v": False}
+        ctx.on("close", lambda *a: closed.__setitem__("v", True))
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        ok = False
+        for _u in ("https://www.facebook.com/reg/", "https://www.facebook.com/r.php"):
+            try:
+                await page.goto(_u, wait_until="domcontentloaded", timeout=25000)
+                ok = True; break
+            except Exception:
+                continue
+        if not ok:
+            try: await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=25000)
+            except Exception: pass
+        send_ui("log", text="   👉 Create a new account in this window. Once it's made and you're logged in, "
+                            "CLOSE the window — the account will be saved in this profile.")
+        while not closed["v"] and not stop_event.is_set():
+            await sleep(1)
+            try:
+                if not ctx.pages: break
+            except Exception: break
+        logged_in = False
+        try:
+            if ctx.pages:
+                try: logged_in = await ctx.pages[0].locator('[role="navigation"]').count() > 0
+                except Exception: logged_in = False
+            await ctx.close()
+        except Exception: pass
+        send_ui("log", text=("✅ New account saved in this profile — you can START/use it now."
+                             if logged_in else
+                             "ℹ️ Window closed. If the account was created and logged in, it is saved."))
+    send_ui("create_account_done")
+
+
+def run_create_account():
+    try:
+        asyncio.run(_create_account_main())
+    except Exception as e:
+        log_error("create account failed", e)
+        send_ui("log", text=f"❌ Create-account browser failed: {str(e)[:200]}")
+        _h = _launch_error_hint(e)
+        if _h: send_ui("log", text=f"💡 {_h}")
+        send_ui("create_account_done")
+
+
+# ── Clear data: is profile ke cookies + storage wipe (fresh account ke liye) ─
+async def _clear_data_main():
+    """Is profile ka Facebook data (cookies + local/session storage + IndexedDB)
+    saaf karo — taake naya account banane/login karne se pehle tab bilkul clean
+    ho. Logout jaisa hi, par zyada mukammal."""
+    send_ui("log", text="🧹 Clearing this profile's data (cookies + storage)…")
+    try:
+        async with async_playwright() as p:
+            ctx = await _launch_ctx(p, headless=True)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            try:
+                await page.goto("https://www.facebook.com/", timeout=30000,
+                                wait_until="domcontentloaded")
+                await page.evaluate(
+                    "() => { try { localStorage.clear(); sessionStorage.clear(); "
+                    "if (window.indexedDB && indexedDB.databases) "
+                    "indexedDB.databases().then(dbs => dbs.forEach(d => "
+                    "indexedDB.deleteDatabase(d.name))); } catch(e) {} }")
+            except Exception:
+                pass
+            try: await ctx.clear_cookies()
+            except Exception: pass
+            try: await ctx.clear_permissions()
+            except Exception: pass
+            await ctx.close()
+        send_ui("log", text="✅ Data cleared — this profile's cookies/storage have been wiped. "
+                            "(Ready for logging in again / a new account.)")
+    except Exception as e:
+        send_ui("log", text=f"clear-data error: {str(e)[:120]}")
+    send_ui("clear_data_done")
+
+
+def run_clear_data():
+    try:
+        asyncio.run(_clear_data_main())
+    except Exception as e:
+        send_ui("log", text=f"clear-data error: {str(e)[:120]}")
+        send_ui("clear_data_done")
 
 
 # ── Auto-post to joined groups (DEV only) ───────────────────
@@ -4732,7 +4915,7 @@ async def _click_recently_joined_sort(page) -> bool:
         # Header text nahi mila — phir bhi aage direct "Sort" text/opener try
         # karenge (purana tareeqa), tabhi sort fail maanenge. (Strict return
         # nahi, warna jo pehle kaam kar raha tha woh toot jata.)
-        send_ui("log", text="   ↳ section header na mila — direct 'Sort' try kar raha…")
+        send_ui("log", text="   ↳ section header not found — trying 'Sort' directly…")
     await sleep(rand_delay(0.6, 1.1))
 
     # 2) 'Sort' click — pehle JS-tagged (header ke bilkul paas wala), warna
@@ -5075,16 +5258,93 @@ async def _post_to_group(page, message: str, image_path: str) -> str:
         return "error"
 
 
-async def _autopost_main(config):
+async def _read_group_rules(page) -> str:
+    """Is group ke 'Group rules' ka text best-effort nikaalo. 'See group rules' /
+    'Group rules' kholne ki koshish, phir dialog/section se text. Na mile -> ''
+    (caller phir original post hi karega)."""
+    rules = ""
+    # 1) rules kholne wala button/link
+    for sel in ('div[role="button"]:has-text("See group rules")',
+                'a:has-text("See group rules")',
+                'div[role="button"]:has-text("Group rules")',
+                'span:has-text("See group rules")'):
+        try:
+            b = page.locator(sel).first
+            if await b.count() and await b.is_visible(timeout=800):
+                await b.click()
+                await sleep(rand_delay(1.5, 2.5))
+                break
+        except Exception:
+            continue
+    # 2) dialog se text
+    try:
+        dlg = page.locator('div[role="dialog"]').last
+        if await dlg.count() and await dlg.is_visible(timeout=800):
+            rules = (await dlg.inner_text() or "").strip()
+    except Exception:
+        pass
+    # 3) dialog na ho -> page body mein "group rules" ke aas-paas ka text
+    if not rules:
+        try:
+            body = await page.inner_text("body")
+            low = body.lower()
+            i = low.find("group rules")
+            if i < 0:
+                i = low.find("rules")
+            if i >= 0:
+                rules = body[i:i + 2200].strip()
+        except Exception:
+            pass
+    # dialog band karo
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return (rules or "")[:2500]
+
+
+async def _adapt_message_to_rules(message: str, rules: str) -> str:
+    """Gemini se: group rules ke khilaf jo word/topic ho use safe alternative se
+    badal ke post wapas do. Rules/AI/keys na hon -> original message."""
+    if not message or not rules or not GEMINI_KEYS:
+        return message
+    prompt = (
+        "You are adjusting a Facebook post so it does NOT break this group's rules.\n\n"
+        "GROUP RULES:\n" + rules[:1800] + "\n\n"
+        "POST:\n" + message + "\n\n"
+        "If the post uses any word, phrase, or topic the rules PROHIBIT (for example "
+        "advertising, selling, promotions, links, phone numbers, business names, or any "
+        "specific banned words), REWRITE the post and REPLACE those with safe natural "
+        "alternatives that keep the same meaning. Do NOT use any word the rules forbid. "
+        "If nothing is prohibited, return the post unchanged. Keep it roughly the same "
+        "length and friendly tone. Output ONLY the final post text — no quotes, no notes."
+    )
+    try:
+        ans = (await gemini_answer(prompt) or "").strip()
+        if ans and 3 <= len(ans) <= len(message) * 4 + 300:
+            return ans
+    except Exception:
+        pass
+    return message
+
+
+async def _autopost_main(config, use_rules=False):
     msg   = config.get("post_message", "").strip()
     img   = config.get("post_image", "")
-    send_ui("log", text="\n📢 Auto-post: launching browser…")
+    if use_rules:
+        global GEMINI_KEYS
+        GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
+        send_ui("log", text=f"\n📢📋 Auto-post (with Group Rules): launching browser… "
+                            f"({len(GEMINI_KEYS)} AI key(s) — each post adjusted to that "
+                            f"group's rules).")
+    else:
+        send_ui("log", text="\n📢 Auto-post: launching browser…")
     # Already-posted groups ko GROUP-ID se match karte hain (sirf poora-URL
     # string se nahi) — taake live 'recently joined' list (jo normalized
     # /groups/<id>/ deti hai) aur purane posted URLs sahi se match hon.
     posted_set = _load_posted()
     posted_ids = {_group_id(u) for u in posted_set if _group_id(u)}
-    send_ui("log", text=f"   {len(posted_set)} group(s) already posted — unme dobara nahi hoga.")
+    send_ui("log", text=f"   {len(posted_set)} group(s) already posted — won't post to them again.")
 
     done = fails = 0
     try:
@@ -5280,22 +5540,37 @@ async def _autopost_main(config):
                     send_ui("log", text="   ↻ Rest done — retrying posting…")
                     continue   # is group ko agli run retry; abhi aage se shuru
 
-                # ── 1 POST PER MINUTE pacing ──────────────────────
-                # Har post ke beech ~60 sec (chhoti jitter se robotic na lage).
-                # Pichle post ko jitna waqt ho chuka (beech ke skips/load sab
-                # shamil) utna ghata ke bachी der ruk jao -> steady ~1 post/min.
+                # ── 1 POST PER 2 MINUTES pacing ───────────────────
+                # Har post ke beech ~120 sec (ban se bachne ke liye pehle 1 min
+                # tha, ab 2 min). Pichle post ko jitna waqt ho chuka (beech ke
+                # skips/load sab shamil) utna ghata ke bachी der ruk jao.
                 if _last_post_at:
-                    _until = _last_post_at + rand_delay(58, 63)
+                    _until = _last_post_at + rand_delay(118, 123)
                     _rem = _until - time.time()
                     if _rem > 1:
-                        send_ui("log", text=f"   ⏱️ 1 post/min — waiting {int(_rem)}s…")
+                        send_ui("log", text=f"   ⏱️ 1 post / 2 min — waiting {int(_rem)}s…")
                         while time.time() < _until and not stop_event.is_set():
                             await asyncio.sleep(min(3, max(0.2, _until - time.time())))
                 if stop_event.is_set():
                     break
                 _last_post_at = time.time()
 
-                res = await _post_to_group(page, msg, img)
+                # Rules mode: is group ke rules padho; agar post mein koi mana
+                # kiya word/topic ho to Gemini se safe alternative wali post
+                # banao. Rules/AI na mile -> original post (fail-safe).
+                _msg_g = msg
+                if use_rules:
+                    try:
+                        _rules = await _read_group_rules(page)
+                        if _rules:
+                            _adj = await _adapt_message_to_rules(msg, _rules)
+                            if _adj and _adj.strip() != msg.strip():
+                                _msg_g = _adj.strip()
+                                send_ui("log", text=f"   ✍️ [{i}/{len(urls)}] post adjusted to group rules: {gname}")
+                    except Exception:
+                        _msg_g = msg
+
+                res = await _post_to_group(page, _msg_g, img)
                 if res in ("posted", "pending"):
                     done += 1
                     _ap_rests = 0          # kamyaab post -> block-rest counter reset
@@ -5311,7 +5586,7 @@ async def _autopost_main(config):
                                             f"resting {_mins} min, then continuing from here…")
                         if _act:
                             try: _act.alert(f"Auto-post: {AUTOPOST_POSTS_PER_REST} posts done "
-                                            f"— {_mins} min rest, phir aage.")
+                                            f"— {_mins} min rest, then continuing.")
                             except Exception: pass
                         _re = time.time() + AUTOPOST_BATCH_REST_SEC
                         while time.time() < _re and not stop_event.is_set():
@@ -5349,9 +5624,9 @@ async def _autopost_main(config):
     _blocked = config.get("_end_reason") == "account_blocked"
     if _blocked:
         _m = (f"\n🚫 AUTO-POST STOPPED by Facebook (account check / posting limit) — "
-              f"posted {done}, skipped/failed {fails}.  NOT finished — is account ko thodi "
-              f"der aaram do, phir Auto Post dobara chalao (jo ho chuke wo yaad hain, "
-              f"wahीn se aage barhega).")
+              f"posted {done}, skipped/failed {fails}.  NOT finished — give this account a "
+              f"little rest, then run Auto Post again (the ones already done are remembered, "
+              f"it continues from there).")
     elif stop_event.is_set():
         _m = f"\n■ AUTO-POST STOPPED — posted {done}, skipped/failed {fails}."
     else:
@@ -5372,6 +5647,16 @@ def run_autopost(config):
         asyncio.run(_autopost_main(config))
     except Exception as e:
         send_ui("log", text=f"auto-post error: {str(e)[:100]}")
+        send_ui("autopost_done")
+
+
+def run_autopost_rules(config):
+    """Auto-post with GROUP RULES: wahi autopost flow, par har group ke rules
+    padh ke post ko un ke mutabiq adjust (Gemini) karke bhejta hai."""
+    try:
+        asyncio.run(_autopost_main(config, use_rules=True))
+    except Exception as e:
+        send_ui("log", text=f"auto-post (rules) error: {str(e)[:100]}")
         send_ui("autopost_done")
 
 
@@ -5604,18 +5889,18 @@ async def _autocomment_main(config):
     template = _comment_template(config)
     _cimg = (config.get("comment_image") or "").strip()
     if not template and not (_cimg and os.path.exists(_cimg)):
-        send_ui("log", text="⚠️ Auto-comment: na koi template message hai na card "
-                            "image. Kam se kam ek do. Ruk gaye.")
+        send_ui("log", text="⚠️ Auto-comment: no template message and no card "
+                            "image. Provide at least one. Stopped.")
         send_ui("autocomment_done")
         return
     if _cimg:
-        send_ui("log", text=f"🖼  Card image set — har approved post par comment ke saath jayegi.")
+        send_ui("log", text=f"🖼  Card image set — it will go with the comment on every approved post.")
 
     global GEMINI_KEYS
     GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
     done = _load_commented()
-    send_ui("log", text="\U0001f4ac Auto-comment ON — har 15 min approvals check honge. "
-                        "Bot chalta rahega (STOP se rukega).")
+    send_ui("log", text="\U0001f4ac Auto-comment ON — approvals checked every 15 min. "
+                        "The bot keeps running (STOP to stop).")
 
     async with async_playwright() as p:
         ctx = await _launch_ctx(p, headless=False,
@@ -5631,7 +5916,7 @@ async def _autocomment_main(config):
                 appr = await _scan_approval_notifications(page)
                 new = [(t, h) for (t, h) in appr if h and h not in done]
                 if new:
-                    send_ui("log", text=f"✅ {len(new)} approved post(s) mile — comment kar rahe hain…")
+                    send_ui("log", text=f"✅ {len(new)} approved post(s) found — commenting now…")
                 for text, href in new:
                     if stop_event.is_set():
                         break
@@ -5650,7 +5935,7 @@ async def _autocomment_main(config):
                         except Exception: pass
                     await sleep(rand_delay(8, 16))   # comments ke beech gap
                 if not new:
-                    send_ui("log", text="   ℹ️ Koi nayi approval nahi. 15 min baad phir dekhenge.")
+                    send_ui("log", text="   ℹ️ No new approvals. Will check again in 15 min.")
             except Exception as e:
                 log_error("autocomment loop", e)
 

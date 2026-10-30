@@ -274,7 +274,7 @@
         <div class="with-ic"><span class="ci">🔗</span>
           <input id="page" class="inp" placeholder="https://www.facebook.com/profile.php?id=…">
         </div>
-        <label class="check" id="safeChk"><span class="bx">✓</span><span>🛡 Duct Safe Mode — private-only, all duct areas, never stops</span></label>
+        <label class="check" id="safeChk"><span class="bx">✓</span><span>🛡 Safe Mode — join ALL areas, never stops (works for Car or Duct)</span></label>
       </div>
 
       <div class="panel">
@@ -329,8 +329,12 @@
         <div class="ghd"><div class="gi">⚡</div><span>Options</span></div>
         <div class="opts">
           <button class="obtn" id="btnLogin"><span class="bi">📘</span> Login to Facebook</button>
+          <button class="obtn" id="btnCreateAcc"><span class="bi">🆕</span> Create Facebook Account</button>
+          <button class="obtn" id="btnScroll"><span class="bi">🧭</span> Auto-Scroll Feed (10–15 min)</button>
+          <button class="obtn" id="btnClearData"><span class="bi">🧹</span> Clear Data (Cookies)</button>
           <button class="obtn" id="btnLogout"><span class="bi">🚪</span> Log out of Facebook</button>
           <button class="obtn" id="btnAutopost"><span class="bi">📢</span> Auto Post on Page</button>
+          <button class="obtn" id="btnAutopostRules"><span class="bi">📋</span> Auto Post (with Group Rules)</button>
           <button class="obtn" id="btnAutocomment" style="display:none;"><span class="bi">💬</span> Auto-Comment on Approvals</button>
           <button class="obtn" id="btnPreflight"><span class="bi">🔎</span> Pre-flight Check</button>
           <button class="start" id="btnStart">▶  START BOT</button>
@@ -507,17 +511,18 @@ $("#area").onchange=()=>{const list=[...$("#area").options].map(o=>o.value);
 function refreshMix(){const p=Math.max(0,Math.min(100,+$("#pub").value||0));
   $("#mix").textContent=`→ ${p}% public / ${100-p}% private`;}
 function applySafe(){const on=$("#safeChk").classList.contains("on");
-  $$(".biz button").forEach(b=>b.disabled=on);
-  $("#area").disabled=on; $("#pub").disabled=on;
-  if(on){$$(".biz button").forEach(b=>b.classList.toggle("on",b.dataset.v==="duct"));
-    $("#pub").value=0; refreshMix();}
+  // Safe Mode = saare areas + never-stop, SELECTED mode ke liye (Car ya Duct).
+  // Pehle yeh sirf Duct + private-only par hardwired tha; ab mode user chunta
+  // hai, bas area ALL AREAS par lock ho jata hai.
+  $("#area").disabled=on;
+  if(on && window._allAreas){ $("#area").value=window._allAreas; }
   updateNextDisabled();}
 
 /* ---- interactions ---- */
 $("#biz").onclick=e=>{const b=e.target.closest("button");if(!b||b.disabled)return;
   if((b.dataset.v==="garage"||b.dataset.v==="duct_test") && !window._isAdmin){toast("🔒 Only for Admins");return;}
   $$(".biz button").forEach(x=>x.classList.remove("on"));b.classList.add("on");
-  api("/api/areas?mode="+b.dataset.v).then(r=>{buildAreas(r.areas,r.city);buildNextAreas(r.areas,r.city,[]);});};
+  api("/api/areas?mode="+b.dataset.v).then(r=>{buildAreas(r.areas,r.city);buildNextAreas(r.areas,r.city,[]);applySafe();});};
 $("#pub").oninput=refreshMix;
 $("#safeChk").onclick=()=>{$("#safeChk").classList.toggle("on");applySafe();};
 ["f_nopost","f_state","f_county"].forEach(id=>$("#"+id).onclick=()=>$("#"+id).classList.toggle("on"));
@@ -529,12 +534,21 @@ $("#btnStart").onclick=async()=>{
   if(r.error)toast(r.error); else toast("Bot started");
 };
 $("#btnLogin").onclick=async()=>{const r=await api("/api/login",{});toast(r.msg||"Opening browser…");};
+$("#btnCreateAcc").onclick=async()=>{const r=await api("/api/create_account",{});toast(r.msg||"Opening create-account page…");};
+$("#btnScroll").onclick=async()=>{const r=await api("/api/autoscroll",{});toast(r.msg||"Auto-scrolling…");};
+$("#btnClearData").onclick=async()=>{if(!confirm("Clear this profile's cookies/data? You'll need to log in again."))return;const r=await api("/api/clear_data",{});toast(r.msg||"Clearing data…");};
 $("#btnLogout").onclick=async()=>{const r=await api("/api/logout",{});toast(r.msg||"Logging out…");};
 $("#btnAutopost").onclick=async()=>{
   if(!window._isAdmin){toast("🔒 Only for Admins");return;}
   const msg=($("#apmsg").value||"").trim();
   if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
   const r=await api("/api/autopost",{post_message:msg,post_image:($("#apimg").value||"").trim(),page_link:$("#page").value.trim()});
+  toast(r.error||r.msg||"…");};
+$("#btnAutopostRules").onclick=async()=>{
+  if(!window._isAdmin){toast("🔒 Only for developer");return;}
+  const msg=($("#apmsg").value||"").trim();
+  if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
+  const r=await api("/api/autopost_rules",{post_message:msg,post_image:($("#apimg").value||"").trim(),page_link:$("#page").value.trim()});
   toast(r.error||r.msg||"…");};
 $("#btnAutocomment").onclick=async()=>{
   if(!window._isAdmin){toast("🔒 Only for Admins");return;}

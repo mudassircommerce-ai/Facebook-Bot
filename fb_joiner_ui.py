@@ -131,7 +131,8 @@ def _drain_loop():
                     STATE["joined_run"] += 1
             elif t == "skipped":
                 with _LK: STATE["skipped"] += 1
-            elif t in ("login_done", "logout_done", "preflight_done", "autopost_done"):
+            elif t in ("login_done", "logout_done", "preflight_done", "autopost_done",
+                       "autoscroll_done", "create_account_done", "clear_data_done"):
                 with _LK: STATE["busy"] = False
             elif t == "autocomment_done":
                 with _LK:
@@ -311,7 +312,11 @@ def _build_config(d, info):
     # jata hai, phir ruk jata hai. ALL-AREAS / safe-mode mein ignore.
     next_areas = [str(x).strip() for x in (d.get("next_areas") or []) if str(x).strip()]
     if safe:
-        mode = "duct"; pub = 0; city = B.ALL_AREAS_LABEL; next_areas = []
+        # Safe Mode = saare areas + never-stop, user ke CHUNE mode (car/duct/
+        # garage) ke liye. Pehle yahan mode="duct" aur pub=0 force hota tha
+        # (sirf duct + private) — ab nahi: car bhi safe mode mein chal sakta hai
+        # apne public/private mix ke saath. Bas area ALL-AREAS par lock.
+        city = B.ALL_AREAS_LABEL; next_areas = []
     if city == B.ALL_AREAS_LABEL:
         next_areas = []
     # Daily limit: ADMIN apni marzi ka set kar sakta hai; employee LOCKED 200.
@@ -436,8 +441,16 @@ class H(BaseHTTPRequestHandler):
             self._json(self._upload(d))
         elif u.path == "/api/autopost":
             self._json(self._start_autopost(d))
+        elif u.path == "/api/autopost_rules":
+            self._json(self._start_autopost(d, use_rules=True))
         elif u.path == "/api/autocomment":
             self._json(self._start_autocomment(d))
+        elif u.path == "/api/autoscroll":
+            self._json(self._simple(B.run_autoscroll, "Auto-scrolling Facebook feed for ~10–15 min… (STOP to cancel)"))
+        elif u.path == "/api/create_account":
+            self._json(self._simple(B.run_create_account, "Opening Facebook 'Create account' page…"))
+        elif u.path == "/api/clear_data":
+            self._json(self._simple(B.run_clear_data, "Clearing this profile's data (cookies + storage)…"))
         elif u.path == "/api/activate":
             self._json(self._activate(d))
         elif u.path == "/api/save":
@@ -545,12 +558,12 @@ class H(BaseHTTPRequestHandler):
             return {"error": "Save failed: " + str(e)[:80]}
         return {"ok": True, "path": path, "name": safe}
 
-    def _start_autopost(self, d):
+    def _start_autopost(self, d, use_rules=False):
         info = _lic_info()
         if not info.get("ok"):
             return {"error": info.get("error") or "License required"}
         if not info.get("admin"):
-            return {"error": "🔒 Auto-post is admin-only."}
+            return {"error": "🔒 Only for developer — this is an admin-only feature."}
         # Joining chal rahi ho to auto-post mat chalao (dono ek saath = conflict).
         with _LK:
             _running = STATE.get("running")
@@ -579,9 +592,14 @@ class H(BaseHTTPRequestHandler):
         B.stop_event.clear(); B.user_stop_event.clear()
         with _LK:
             STATE["busy"] = True
-            STATE["area"] = "📢 Auto-post — posting to your joined groups"
-        threading.Thread(target=B.run_autopost, args=(cfg,), daemon=True).start()
-        return {"ok": True, "msg": "Auto-post started — a browser will open and post to each joined group."}
+            STATE["area"] = ("📢📋 Auto-post (group rules) — adjusting each post to the group's rules"
+                             if use_rules else
+                             "📢 Auto-post — posting to your joined groups")
+        _fn = B.run_autopost_rules if use_rules else B.run_autopost
+        threading.Thread(target=_fn, args=(cfg,), daemon=True).start()
+        return {"ok": True, "msg": ("Auto-post (with group rules) started — each post is adjusted to the group's rules."
+                                    if use_rules else
+                                    "Auto-post started — a browser will open and post to each joined group.")}
 
     def _simple(self, fn, msg):
         with _LK: STATE["busy"] = True
