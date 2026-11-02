@@ -329,12 +329,12 @@
         <div class="ghd"><div class="gi">⚡</div><span>Options</span></div>
         <div class="opts">
           <button class="obtn" id="btnLogin"><span class="bi">📘</span> Login to Facebook</button>
-          <button class="obtn" id="btnCreateAcc"><span class="bi">🆕</span> Create Facebook Account</button>
           <button class="obtn" id="btnScroll"><span class="bi">🧭</span> Auto-Scroll Feed (10–15 min)</button>
           <button class="obtn" id="btnClearData"><span class="bi">🧹</span> Clear Data (Cookies)</button>
           <button class="obtn" id="btnLogout"><span class="bi">🚪</span> Log out of Facebook</button>
           <button class="obtn" id="btnAutopost"><span class="bi">📢</span> Auto Post on Page</button>
           <button class="obtn" id="btnAutopostRules"><span class="bi">📋</span> Auto Post (with Group Rules)</button>
+          <button class="obtn" id="btnAutopostRepost"><span class="bi">🔁</span> Auto Post (Delete &amp; Repost Pending)</button>
           <button class="obtn" id="btnAutocomment" style="display:none;"><span class="bi">💬</span> Auto-Comment on Approvals</button>
           <button class="obtn" id="btnPreflight"><span class="bi">🔎</span> Pre-flight Check</button>
           <button class="start" id="btnStart">▶  START BOT</button>
@@ -534,7 +534,6 @@ $("#btnStart").onclick=async()=>{
   if(r.error)toast(r.error); else toast("Bot started");
 };
 $("#btnLogin").onclick=async()=>{const r=await api("/api/login",{});toast(r.msg||"Opening browser…");};
-$("#btnCreateAcc").onclick=async()=>{const r=await api("/api/create_account",{});toast(r.msg||"Opening create-account page…");};
 $("#btnScroll").onclick=async()=>{const r=await api("/api/autoscroll",{});toast(r.msg||"Auto-scrolling…");};
 $("#btnClearData").onclick=async()=>{if(!confirm("Clear this profile's cookies/data? You'll need to log in again."))return;const r=await api("/api/clear_data",{});toast(r.msg||"Clearing data…");};
 $("#btnLogout").onclick=async()=>{const r=await api("/api/logout",{});toast(r.msg||"Logging out…");};
@@ -545,10 +544,16 @@ $("#btnAutopost").onclick=async()=>{
   const r=await api("/api/autopost",{post_message:msg,post_image:($("#apimg").value||"").trim(),page_link:$("#page").value.trim()});
   toast(r.error||r.msg||"…");};
 $("#btnAutopostRules").onclick=async()=>{
-  if(!window._isAdmin){toast("🔒 Only for developer");return;}
+  if(!window._isDeveloper){toast("🔒 Only for developers");return;}
   const msg=($("#apmsg").value||"").trim();
   if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
   const r=await api("/api/autopost_rules",{post_message:msg,post_image:($("#apimg").value||"").trim(),page_link:$("#page").value.trim()});
+  toast(r.error||r.msg||"…");};
+$("#btnAutopostRepost").onclick=async()=>{
+  if(!window._isDeveloper){toast("🔒 Only for developers");return;}
+  const msg=($("#apmsg").value||"").trim();
+  if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
+  const r=await api("/api/autopost_repost",{post_message:msg,post_image:($("#apimg").value||"").trim(),page_link:$("#page").value.trim()});
   toast(r.error||r.msg||"…");};
 $("#btnAutocomment").onclick=async()=>{
   if(!window._isAdmin){toast("🔒 Only for Admins");return;}
@@ -611,6 +616,7 @@ async function poll(){
       $("#secName").textContent=s.lic.employee||"this device";
       $("#secMid").textContent=s.lic.mid||"—";
       window._isAdmin = !!s.lic.admin;   // Garage sirf admin chala sakta hai
+      window._isDeveloper = !!s.lic.developer; // Rules + Delete&Repost = developer-only
       // Admin -> daily limit editable; employee -> 200 locked
       $("#limLocked").style.display = s.lic.admin ? "none" : "";
       $("#limInput").style.display  = s.lic.admin ? "" : "none";

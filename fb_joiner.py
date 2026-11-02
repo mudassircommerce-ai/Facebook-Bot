@@ -5258,6 +5258,126 @@ async def _post_to_group(page, message: str, image_path: str) -> str:
         return "error"
 
 
+async def _delete_pending_post(page, url: str) -> bool:
+    """Is group mein humara PENDING (admin approval) post DELETE karo (UI
+    screenshots-confirmed flow):
+      1) 'Manage' / 'Manage post' kholo -> 'Pending · N' view (card par Edit +
+         Delete buttons seedhe dikhte hain).
+      2) card ka DIRECT 'Delete' button dabao (⋯ menu nahi).
+      3) confirm dialog 'Delete post?' -> blue 'Delete' dabao.
+      4) group dobara load karke verify: pending banner gaya?
+    Delete ho gaya -> True; warna False."""
+    # 1) Manage kholo (pending banner ke saamne link/button)
+    opened = False
+    for sel in ('div[role="button"]:has-text("Manage post")',
+                'a:has-text("Manage post")',
+                'div[role="button"]:has-text("Manage")',
+                'a:has-text("Manage")',
+                'span:has-text("Manage")'):
+        try:
+            b = page.locator(sel).first
+            if await b.count() and await b.is_visible(timeout=1000):
+                await b.click()
+                await sleep(rand_delay(2, 3.5))
+                opened = True
+                break
+        except Exception:
+            continue
+    if not opened:
+        return False
+    await _dismiss_group_gates(page)
+    await sleep(rand_delay(1.5, 2.5))
+
+    # Manage kabhi "Your content" (full page: Pending/Published/Declined/Removed)
+    # kholta hai (Capture6). Us soorat mein 'Pending' tab yakeeni karo; agar
+    # "No posts to show" ho -> kuch delete karne ko nahi (True, caller post karega).
+    try:
+        _body = (await page.inner_text("body")).lower()
+    except Exception:
+        _body = ""
+    if "your content" in _body:
+        for sel in ('div[role="button"]:has-text("Pending")',
+                    'a:has-text("Pending")', 'span:has-text("Pending")'):
+            try:
+                t = page.locator(sel).first
+                if await t.count() and await t.is_visible(timeout=800):
+                    await t.click(); await sleep(rand_delay(1, 2)); break
+            except Exception:
+                continue
+        try:
+            _body = (await page.inner_text("body")).lower()
+        except Exception:
+            pass
+    if "no posts to show" in _body:
+        return True   # pending khali/glitch — delete karne ko kuch nahi
+
+    # 2) pending post DELETE karo. Do layouts:
+    #    (a) inline card: seedha "Delete" button (Capture4)
+    #    (b) "Your content" card: ⋯ (More options) -> "Delete post"
+    clicked = False
+    try:
+        db = page.get_by_role("button", name="Delete", exact=True).first
+        if await db.count() and await db.is_visible(timeout=2500):
+            await db.click(); await sleep(rand_delay(1, 2)); clicked = True
+    except Exception:
+        pass
+    if not clicked:
+        for sel in ('div[role="button"]:has-text("Delete")', '[aria-label="Delete"]'):
+            try:
+                db = page.locator(sel).first
+                if await db.count() and await db.is_visible(timeout=1200):
+                    await db.click(); await sleep(rand_delay(1, 2)); clicked = True; break
+            except Exception:
+                continue
+    if not clicked:
+        # (b) ⋯ menu -> Delete post
+        for sel in ('div[aria-label="More options"]',
+                    'div[role="button"][aria-label*="options" i]',
+                    'div[role="button"][aria-label*="Actions" i]',
+                    'div[role="button"][aria-haspopup="menu"]'):
+            try:
+                mb = page.locator(sel).first
+                if await mb.count() and await mb.is_visible(timeout=1200):
+                    await mb.click(); await sleep(rand_delay(1, 2))
+                    break
+            except Exception:
+                continue
+        for sel in ('div[role="menuitem"]:has-text("Delete post")',
+                    'div[role="menuitem"]:has-text("Delete")',
+                    'span:has-text("Delete post")'):
+            try:
+                mi = page.locator(sel).first
+                if await mi.count() and await mi.is_visible(timeout=1500):
+                    await mi.click(); await sleep(rand_delay(1, 2)); clicked = True; break
+            except Exception:
+                continue
+    if not clicked:
+        return False
+
+    # 3) confirm dialog "Delete post?" -> blue "Delete" (dialog ke andar wala)
+    for sel in ('div[role="dialog"] div[role="button"]:has-text("Delete")',
+                'div[role="dialog"] [aria-label="Delete"]',
+                'div[role="dialog"] span:has-text("Delete")'):
+        try:
+            cb = page.locator(sel).last
+            if await cb.count() and await cb.is_visible(timeout=2500):
+                await cb.click()
+                await sleep(rand_delay(2, 3.5))
+                break
+        except Exception:
+            continue
+
+    # 4) group dobara load karke verify: pending banner gaya?
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await sleep(rand_delay(2, 3.5))
+        await dismiss_popups(page)
+        body = (await page.inner_text("body")).lower()
+        return "pending admin approval" not in body
+    except Exception:
+        return True
+
+
 async def _read_group_rules(page) -> str:
     """Is group ke 'Group rules' ka text best-effort nikaalo. 'See group rules' /
     'Group rules' kholne ki koshish, phir dialog/section se text. Na mile -> ''
@@ -5328,9 +5448,13 @@ async def _adapt_message_to_rules(message: str, rules: str) -> str:
     return message
 
 
-async def _autopost_main(config, use_rules=False):
+async def _autopost_main(config, use_rules=False, repost_pending=False):
     msg   = config.get("post_message", "").strip()
     img   = config.get("post_image", "")
+    if repost_pending:
+        send_ui("log", text="\n📢🔁 Auto-post (Delete & Repost Pending): launching browser… "
+                            "(groups where our post is pending admin approval will be "
+                            "deleted and re-posted).")
     if use_rules:
         global GEMINI_KEYS
         GEMINI_KEYS = list(config.get("gemini_keys", []) or [])
@@ -5465,11 +5589,35 @@ async def _autopost_main(config, use_rules=False):
                 if ("pending admin approval" in _full
                         or "your post is pending" in _full
                         or "your pending post" in _full):
-                    _mark_posted(url)
-                    send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending admin approval "
-                                        f"— not posting again: {gname}")
-                    await sleep(rand_delay(3, 6))
-                    continue
+                    if repost_pending:
+                        # Delete-&-repost mode: pending post delete karo, phir USI
+                        # group par post LAZMI (chahe delete confirm ho ya glitch).
+                        send_ui("log", text=f"   🔁 [{i}/{len(urls)}] pending found — "
+                                            f"deleting old post & reposting: {gname}")
+                        try:
+                            _deleted = await _delete_pending_post(page, url)
+                        except Exception:
+                            _deleted = False
+                        send_ui("log", text=(f"   🗑️ [{i}/{len(urls)}] pending deleted — posting in SAME group: {gname}"
+                                             if _deleted else
+                                             f"   ⚠️ [{i}/{len(urls)}] delete uncertain (glitch) — posting anyway: {gname}"))
+                        # MANDATORY: delete ke baad USI group par wapas aa ke post
+                        # karo — skip bilkul nahi (Muzammil: "ek martaba delete ki
+                        # to us group mein post karna lazmi hai"). Phir loop next.
+                        try:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                            await sleep(rand_delay(2.5, 4))
+                            await dismiss_popups(page)
+                            await _dismiss_group_gates(page)
+                        except Exception:
+                            pass
+                        # (continue NAHI — neeche membership + post chalega)
+                    else:
+                        _mark_posted(url)
+                        send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending admin approval "
+                                            f"— not posting again: {gname}")
+                        await sleep(rand_delay(3, 6))
+                        continue
 
                 # ── MEMBERSHIP CHECK (precise) ────────────────────
                 # Sirf un groups mein post karo jinke account ASAL MEMBER hai.
@@ -5657,6 +5805,17 @@ def run_autopost_rules(config):
         asyncio.run(_autopost_main(config, use_rules=True))
     except Exception as e:
         send_ui("log", text=f"auto-post (rules) error: {str(e)[:100]}")
+        send_ui("autopost_done")
+
+
+def run_autopost_repost(config):
+    """Auto-post DELETE & REPOST pending: wahi autopost flow, par jahan humara
+    post 'pending admin approval' par hai wahan pending post delete karke fresh
+    post daalta hai (skip nahi karta). Alag 'repost' key capability se chalta."""
+    try:
+        asyncio.run(_autopost_main(config, repost_pending=True))
+    except Exception as e:
+        send_ui("log", text=f"auto-post (repost) error: {str(e)[:100]}")
         send_ui("autopost_done")
 
 

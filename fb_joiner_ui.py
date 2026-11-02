@@ -443,12 +443,12 @@ class H(BaseHTTPRequestHandler):
             self._json(self._start_autopost(d))
         elif u.path == "/api/autopost_rules":
             self._json(self._start_autopost(d, use_rules=True))
+        elif u.path == "/api/autopost_repost":
+            self._json(self._start_autopost(d, repost=True))
         elif u.path == "/api/autocomment":
             self._json(self._start_autocomment(d))
         elif u.path == "/api/autoscroll":
             self._json(self._simple(B.run_autoscroll, "Auto-scrolling Facebook feed for ~10–15 min… (STOP to cancel)"))
-        elif u.path == "/api/create_account":
-            self._json(self._simple(B.run_create_account, "Opening Facebook 'Create account' page…"))
         elif u.path == "/api/clear_data":
             self._json(self._simple(B.run_clear_data, "Clearing this profile's data (cookies + storage)…"))
         elif u.path == "/api/activate":
@@ -558,11 +558,16 @@ class H(BaseHTTPRequestHandler):
             return {"error": "Save failed: " + str(e)[:80]}
         return {"ok": True, "path": path, "name": safe}
 
-    def _start_autopost(self, d, use_rules=False):
+    def _start_autopost(self, d, use_rules=False, repost=False):
         info = _lic_info()
         if not info.get("ok"):
             return {"error": info.get("error") or "License required"}
-        if not info.get("admin"):
+        if repost or use_rules:
+            # Delete & Repost AND Group-Rules auto-post = DEVELOPER-only (admin
+            # bhi use na kar paye). Developer key alag se flag hoti hai.
+            if not info.get("developer"):
+                return {"error": "🔒 Only for developers."}
+        elif not info.get("admin"):
             return {"error": "🔒 Only for developer — this is an admin-only feature."}
         # Joining chal rahi ho to auto-post mat chalao (dono ek saath = conflict).
         with _LK:
@@ -592,12 +597,18 @@ class H(BaseHTTPRequestHandler):
         B.stop_event.clear(); B.user_stop_event.clear()
         with _LK:
             STATE["busy"] = True
-            STATE["area"] = ("📢📋 Auto-post (group rules) — adjusting each post to the group's rules"
+            STATE["area"] = ("📢🔁 Auto-post (delete & repost pending) — refreshing pending posts"
+                             if repost else
+                             "📢📋 Auto-post (group rules) — adjusting each post to the group's rules"
                              if use_rules else
                              "📢 Auto-post — posting to your joined groups")
-        _fn = B.run_autopost_rules if use_rules else B.run_autopost
+        _fn = (B.run_autopost_repost if repost else
+               B.run_autopost_rules if use_rules else
+               B.run_autopost)
         threading.Thread(target=_fn, args=(cfg,), daemon=True).start()
-        return {"ok": True, "msg": ("Auto-post (with group rules) started — each post is adjusted to the group's rules."
+        return {"ok": True, "msg": ("Auto-post (delete & repost pending) started — pending posts will be deleted and re-posted."
+                                    if repost else
+                                    "Auto-post (with group rules) started — each post is adjusted to the group's rules."
                                     if use_rules else
                                     "Auto-post started — a browser will open and post to each joined group.")}
 
@@ -650,7 +661,9 @@ class H(BaseHTTPRequestHandler):
                 "rows": rows,
                 "lic": {"ok": bool(info.get("ok")), "employee": info.get("employee", ""),
                         "exp": info.get("exp", ""), "days_left": int(info.get("days_left", 0) or 0),
-                        "admin": bool(info.get("admin")), "mid": (lic.machine_id() or "")[:12],
+                        "admin": bool(info.get("admin")), "repost": bool(info.get("repost")),
+                        "developer": bool(info.get("developer")),
+                        "mid": (lic.machine_id() or "")[:12],
                         "error": info.get("error", "")},
             }
         if not _SETTINGS_SENT[0]:

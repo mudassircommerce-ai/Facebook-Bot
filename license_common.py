@@ -195,7 +195,9 @@ def _fmt_left(seconds: float) -> str:
 
 # ── Key banao / parho ──────────────────────────────────────
 def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
-             exp: str = "", machine: str = "", admin: bool = False) -> str:
+             exp: str = "", machine: str = "", admin: bool = False,
+             repost: bool = False, developer: bool = False,
+             trusted_admin: bool = False) -> str:
     """
     Owner side. Give ONE of:
       exp   : 'YYYY-MM-DD' or full ISO 'YYYY-MM-DDTHH:MM:SS'
@@ -203,6 +205,8 @@ def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
       days  : valid for N days from now
     `machine` empty = runs on any PC; otherwise only that machine-id.
     `admin`   True = developer-only features (auto-post) is key se chalenge.
+    `repost`  True = "delete & repost pending" wala auto-post mode is key se
+              chalega (alag capability flag 'rp'). Admin se alag.
     """
     now = datetime.now().replace(microsecond=0)
     if exp:
@@ -230,6 +234,12 @@ def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
     }
     if admin:
         payload["adm"] = 1
+    if repost:
+        payload["rp"] = 1
+    if developer:
+        payload["dev"] = 1
+    if trusted_admin:
+        payload["tadm"] = 1
     p_b64 = _b64u(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
     sig = _sign(p_b64, priv)
     return f"{KEY_PREFIX}.{p_b64}.{sig}"
@@ -367,8 +377,13 @@ def validate_key(key_str: str, enforce_machine: bool = True,
 
     # Signature verify hone ke BAAD hi admin flag set karo — warna koi
     # apni marzi ka payload bana kar admin ban sakta tha.
-    out["admin"] = bool(pl.get("adm")) or \
-        (pl.get("emp", "").strip().lower() in ADMIN_EMPLOYEES)
+    out["developer"] = bool(pl.get("dev"))         # highest tier (above admin)
+    out["trusted_admin"] = bool(pl.get("tadm"))    # NEW admin tier
+    # Admin features ab SIRF Trusted-Admin (tadm) ya Developer (dev) key se.
+    # Purani "adm:1" admin keys ab admin NAHI rahीn (revoked), aur purana
+    # ADMIN_EMPLOYEES naam-fallback bhi admin nahi deta.
+    out["admin"] = bool(pl.get("tadm")) or bool(pl.get("dev"))
+    out["repost"] = bool(pl.get("rp"))   # (legacy) separate repost capability
 
     try:
         exp_dt = _parse_dt(pl["exp"], end_of_day=True)
