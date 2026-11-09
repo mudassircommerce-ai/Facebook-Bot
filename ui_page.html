@@ -274,6 +274,7 @@
         <div class="with-ic"><span class="ci">🔗</span>
           <input id="page" class="inp" placeholder="https://www.facebook.com/profile.php?id=…">
         </div>
+        <label class="check" id="personalChk"><span class="bx">✓</span><span>👤 Join as my personal account (no Page) — Page link not needed</span></label>
         <label class="check" id="safeChk"><span class="bx">✓</span><span>🛡 Safe Mode — join ALL areas, never stops (works for Car or Duct)</span></label>
       </div>
 
@@ -444,6 +445,7 @@ function collect(){return{
   same_state_only:$("#f_state").classList.contains("on"),
   include_counties:$("#f_county").classList.contains("on"),
   safe_mode:$("#safeChk").classList.contains("on"),
+  join_personal:$("#personalChk").classList.contains("on"),
   search_keywords:$("#kw").value, block_keywords:$("#block").value,
   next_areas:(window.nextOrder||[]),
   daily_limit:(+$("#limInput").value||0),
@@ -462,6 +464,7 @@ function applySettings(s){
   $("#f_state").classList.toggle("on",s.same_state_only);
   $("#f_county").classList.toggle("on",s.include_counties);
   $("#safeChk").classList.toggle("on",s.safe_mode); applySafe();
+  $("#personalChk").classList.toggle("on",!!s.join_personal);
   $("#kw").value=(s.search_keywords||[]).join("\n");
   $("#block").value=(s.block_keywords||[]).join("\n");
   $("#ctmpl").value=s.comment_template||"";
@@ -525,6 +528,7 @@ $("#biz").onclick=e=>{const b=e.target.closest("button");if(!b||b.disabled)retur
   api("/api/areas?mode="+b.dataset.v).then(r=>{buildAreas(r.areas,r.city);buildNextAreas(r.areas,r.city,[]);applySafe();});};
 $("#pub").oninput=refreshMix;
 $("#safeChk").onclick=()=>{$("#safeChk").classList.toggle("on");applySafe();};
+$("#personalChk").onclick=()=>{$("#personalChk").classList.toggle("on");};
 ["f_nopost","f_state","f_county"].forEach(id=>$("#"+id).onclick=()=>$("#"+id).classList.toggle("on"));
 
 $("#btnStart").onclick=async()=>{

@@ -32,7 +32,7 @@ UPDATABLE = {
     "block_keywords.txt", "keywords.txt", "EMPLOYEE_SETUP.txt", "READ_ME_FIRST.txt",
     "README.txt", "START.bat", "fb_joiner_ui.py", "ui_page.html",
     "fix.py", "FIX.bat",
-} | {f"START_{n}.bat" for n in range(2, 21)}   # 20 profiles ki capacity
+} | {f"START_{n}.bat" for n in range(2, 101)}   # 100 profiles ki capacity
 
 
 def _sha(path: str) -> str:
