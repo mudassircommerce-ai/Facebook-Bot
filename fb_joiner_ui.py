@@ -281,6 +281,7 @@ def _current_settings():
         "same_state_only": bool(s.get("same_state_only", True)),
         "include_counties": bool(s.get("include_counties", True)),
         "safe_mode": bool(s.get("safe_mode", False)),
+        "join_personal": bool(s.get("join_personal", False)),
         "search_keywords": _clean_kw_list(s.get("search_keywords")) or B.default_search_keyword_lines(),
         "block_keywords": _clean_kw_list(s.get("block_keywords")) or B.resolve_block_keywords(),
         "comment_template": s.get("comment_template") or _read_comment_template(),
@@ -347,6 +348,7 @@ def _build_config(d, info):
         "search_keywords": kw_lines,
         "_search_templates": B.resolve_search_keywords("\n".join(kw_lines)),
         "business_mode": mode, "safe_mode": safe,
+        "join_personal": bool(d.get("join_personal")),  # Page ke bajaye apni profile se join
         "next_areas": next_areas,   # web UI hamesha bhejta (khali bhi) -> ordered-only mode
     }
     return cfg
@@ -369,6 +371,7 @@ def _persist(d):
             "same_state_only": bool(d.get("same_state_only", True)),
             "include_counties": bool(d.get("include_counties", True)),
             "safe_mode": bool(d.get("safe_mode")),
+            "join_personal": bool(d.get("join_personal")),
             "block_keywords": _clean_kw_list(d.get("block_keywords")),
             "search_keywords": _clean_kw_list(d.get("search_keywords")),
         })
@@ -474,8 +477,8 @@ class H(BaseHTTPRequestHandler):
             return {"error": "\U0001f512 Garage mode is admin-only."}
         if _bm == "duct_test" and not info.get("admin"):
             return {"error": "\U0001f512 Duct Test mode is admin-only."}
-        if not (d.get("page_link") or "").strip():
-            return {"error": "Enter the Facebook Page link first."}
+        if not d.get("join_personal") and not (d.get("page_link") or "").strip():
+            return {"error": "Enter the Facebook Page link first (or tick 'Join as personal account')."}
         if not d.get("safe_mode") and not (d.get("city") or "").strip():
             return {"error": "Pick an area first."}
         _persist(d)

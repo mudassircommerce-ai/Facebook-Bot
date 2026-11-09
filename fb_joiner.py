@@ -3478,7 +3478,8 @@ async def join_one_group(page, url, name, area, config, already_joined=None):
             stop_event.set()
             return "blocked"
 
-        await select_page(page, config.get("page_name", ""))
+        if not config.get("join_personal"):
+            await select_page(page, config.get("page_name", ""))
         await handle_questions(page)
 
         if privacy == "Public":
@@ -4043,26 +4044,30 @@ async def playwright_main(config):
         else:
             send_ui("log", text="✅ Already logged in to Facebook!")
 
-        # Switch to page
+        # Switch to page — PERSONAL account mode mein skip (profile se hi join)
         page_name = config.get("page_name") or DEFAULT_PAGE_NAME
         page_link = (config.get("page_link") or DEFAULT_PAGE_LINK).strip()
-        if not page_name and not page_link:
+        if config.get("join_personal"):
+            send_ui("log", text="👤 Personal account mode — joining as your own profile "
+                                "(no Page). Page link not needed.")
+            switched = True   # koi page-switch nahi; aage personal se hi join hoga
+        elif not page_name and not page_link:
             send_ui("log", text="❌ Page Link is empty — enter your Facebook Page link, then press START.")
             config["_end_reason"] = "no_page_link"
             await ctx.close()
             return
-
-        send_ui("log", text=f"🔄 Switching to page '{page_name or page_link}'...")
-        switched = False
-        if page_link:
-            switched = await switch_via_link(page, page_link, page_name)
-        if not switched and page_name:
-            if page_link:
-                send_ui("log", text="   Link switch failed — trying by name...")
-            switched = await switch_to_page(page, page_name)
-        if switched:
-            send_ui("log", text=f"✅ Switched to page '{page_name or page_link}'!")
         else:
+            send_ui("log", text=f"🔄 Switching to page '{page_name or page_link}'...")
+            switched = False
+            if page_link:
+                switched = await switch_via_link(page, page_link, page_name)
+            if not switched and page_name:
+                if page_link:
+                    send_ui("log", text="   Link switch failed — trying by name...")
+                switched = await switch_to_page(page, page_name)
+            if switched:
+                send_ui("log", text=f"✅ Switched to page '{page_name or page_link}'!")
+        if not config.get("join_personal") and not switched:
             send_ui("log", text="❌ Could not switch to the Page — the bot never joins from a personal profile.")
             send_ui("log", text="   Check: (1) Page Link is correct  (2) this account is an admin of the Page")
             config["_end_reason"] = "setup_failed"
