@@ -565,9 +565,10 @@ class H(BaseHTTPRequestHandler):
         info = _lic_info()
         if not info.get("ok"):
             return {"error": info.get("error") or "License required"}
+        # Gate: Rules/Repost = developer, normal auto-post = admin. (Per-employee
+        # TRIAL key apni window mein admin+developer ON kar deti hai -> pass.
+        # Global "sabke liye" trial hata diya gaya.)
         if repost or use_rules:
-            # Delete & Repost AND Group-Rules auto-post = DEVELOPER-only (admin
-            # bhi use na kar paye). Developer key alag se flag hoti hai.
             if not info.get("developer"):
                 return {"error": "🔒 Only for developers."}
         elif not info.get("admin"):
@@ -665,7 +666,7 @@ class H(BaseHTTPRequestHandler):
                 "lic": {"ok": bool(info.get("ok")), "employee": info.get("employee", ""),
                         "exp": info.get("exp", ""), "days_left": int(info.get("days_left", 0) or 0),
                         "admin": bool(info.get("admin")), "repost": bool(info.get("repost")),
-                        "developer": bool(info.get("developer")),
+                        "developer": bool(info.get("developer")), "trial": bool(info.get("trial")),
                         "mid": (lic.machine_id() or "")[:12],
                         "error": info.get("error", "")},
             }

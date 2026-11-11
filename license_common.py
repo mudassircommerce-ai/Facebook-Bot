@@ -197,7 +197,8 @@ def _fmt_left(seconds: float) -> str:
 def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
              exp: str = "", machine: str = "", admin: bool = False,
              repost: bool = False, developer: bool = False,
-             trusted_admin: bool = False) -> str:
+             trusted_admin: bool = False, trial: bool = False,
+             trial_until: str = "") -> str:
     """
     Owner side. Give ONE of:
       exp   : 'YYYY-MM-DD' or full ISO 'YYYY-MM-DDTHH:MM:SS'
@@ -240,6 +241,10 @@ def make_key(priv: dict, employee: str, days: int = 0, hours: float = 0,
         payload["dev"] = 1
     if trusted_admin:
         payload["tadm"] = 1
+    if trial:
+        payload["tr"] = 1   # trial flag
+        if trial_until:
+            payload["tru"] = trial_until   # trial window end (ISO); khali = key ke poore waqt
     p_b64 = _b64u(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
     sig = _sign(p_b64, priv)
     return f"{KEY_PREFIX}.{p_b64}.{sig}"
@@ -384,6 +389,8 @@ def validate_key(key_str: str, enforce_machine: bool = True,
     # ADMIN_EMPLOYEES naam-fallback bhi admin nahi deta.
     out["admin"] = bool(pl.get("tadm")) or bool(pl.get("dev"))
     out["repost"] = bool(pl.get("rp"))   # (legacy) separate repost capability
+    out["trial"] = bool(pl.get("tr"))    # per-employee trial flag
+    out["trial_until"] = pl.get("tru", "")  # trial window end (ISO); khali = key ke poore waqt
 
     try:
         exp_dt = _parse_dt(pl["exp"], end_of_day=True)
@@ -393,6 +400,25 @@ def validate_key(key_str: str, enforce_machine: bool = True,
         return out
 
     now = datetime.now()
+
+    # Per-employee TRIAL: 'tru' (trial-until) tak SAARE features — is dauran
+    # admin + developer DONO ON. tru guzar jaye -> normal employee key (features
+    # khud lock), key apni exp tak valid rehti hai. 'tr' bina 'tru' = key ke
+    # poore waqt tak trial (backward-compat).
+    _trial_on = False
+    if out["trial"]:
+        _tru = out.get("trial_until", "")
+        if _tru:
+            try:
+                _trial_on = now < _parse_dt(_tru, end_of_day=False)
+            except Exception:
+                _trial_on = False
+        else:
+            _trial_on = True
+    out["trial_active"] = _trial_on
+    if _trial_on:
+        out["admin"] = True
+        out["developer"] = True
 
     # Clock rollback check — have we ever seen a later time than now?
     st = _load_state()
