@@ -620,7 +620,7 @@ async function poll(){
       $("#secName").textContent=s.lic.employee||"this device";
       $("#secMid").textContent=s.lic.mid||"—";
       window._isAdmin = !!s.lic.admin;   // Garage sirf admin chala sakta hai
-      window._isDeveloper = !!s.lic.developer; // Rules + Delete&Repost = developer-only
+      window._isDeveloper = !!s.lic.developer; // trial key apni window mein developer=true
       // Admin -> daily limit editable; employee -> 200 locked
       $("#limLocked").style.display = s.lic.admin ? "none" : "";
       $("#limInput").style.display  = s.lic.admin ? "" : "none";
