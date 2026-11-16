@@ -3729,9 +3729,14 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
         # hai — group ka page dekhna aam browsing hai. Isliye join ke baad
         # poora delay (Delay Min/Max), skip ke baad chhota sa.
         if status == "joined":
-            # Ban se bachne ke liye join ke baad ka rest DOUBLE kar diya gaya
-            # (Muzammil). Jo bhi Delay Min/Max set ho, bot uska 2x rukta hai.
-            wait = 2 * rand_delay(config["delay_min"], config["delay_max"])
+            # SIRF admin/developer bot (ADMIN FB BOT, license emp "Developer")
+            # ke liye relaxed pace: 1x delay + har 50 joins par break. Baaqi sab
+            # (employees) ke liye safe: 2x delay + har 10 joins par break.
+            _relaxed = (config.get("employee", "").strip().lower() == "developer")
+            _mult   = 1 if _relaxed else 2
+            _burst  = 50 if _relaxed else JOIN_BURST_SIZE
+            # Jo bhi Delay Min/Max set ho, bot uska 1x/2x rukta hai (ban se bachao).
+            wait = _mult * rand_delay(config["delay_min"], config["delay_max"])
             send_ui("log", text=f"   ⏳ {wait:.0f}s wait...")
             await sleep(wait)
             # ── HUMAN-LIKE behavior ──────────────────────────────
@@ -3750,10 +3755,10 @@ async def search_and_join(page, city, already_joined, config, joined_today=0, qu
             # Har JOIN_BURST_SIZE joins ke baad ek lamba break (insaan non-stop
             # nahi karta) -> ban-risk kam.
             config["_joins_since_break"] = config.get("_joins_since_break", 0) + 1
-            if config["_joins_since_break"] >= JOIN_BURST_SIZE:
+            if config["_joins_since_break"] >= _burst:
                 config["_joins_since_break"] = 0
                 _br = rand_delay(JOIN_BURST_REST_MIN, JOIN_BURST_REST_MAX)
-                send_ui("log", text=f"   😴 Human break: {JOIN_BURST_SIZE} joins done — "
+                send_ui("log", text=f"   😴 Human break: {_burst} joins done — "
                                     f"resting ~{int(_br // 60)} min, then continuing…")
                 _bend = time.time() + _br
                 while time.time() < _bend and not stop_event.is_set():
@@ -5453,10 +5458,17 @@ async def _adapt_message_to_rules(message: str, rules: str) -> str:
     return message
 
 
-async def _autopost_main(config, use_rules=False, repost_pending=False):
+async def _autopost_main(config, use_rules=False, repost_pending=False,
+                         delete_only=False, post_pending=False):
     msg   = config.get("post_message", "").strip()
     img   = config.get("post_image", "")
-    if repost_pending:
+    if delete_only:
+        send_ui("log", text="\n🗑️ Delete All Pending Posts: launching browser… "
+                            "(each group's pending post will be deleted — no posting).")
+    elif post_pending:
+        send_ui("log", text="\n📢 Post on ALL groups (incl. pending): launching browser… "
+                            "(pending groups won't be skipped — posts everywhere).")
+    elif repost_pending:
         send_ui("log", text="\n📢🔁 Auto-post (Delete & Repost Pending): launching browser… "
                             "(groups where our post is pending admin approval will be "
                             "deleted and re-posted).")
@@ -5594,7 +5606,22 @@ async def _autopost_main(config, use_rules=False, repost_pending=False):
                 if ("pending admin approval" in _full
                         or "your post is pending" in _full
                         or "your pending post" in _full):
-                    if repost_pending:
+                    if delete_only:
+                        # Delete-only mode: pending post delete karo aur agle group
+                        # par jao (koi post nahi).
+                        try:
+                            _deleted = await _delete_pending_post(page, url)
+                        except Exception:
+                            _deleted = False
+                        if _deleted:
+                            done += 1
+                            send_ui("log", text=f"   🗑️ [{i}/{len(urls)}] pending post deleted: {gname}")
+                        else:
+                            fails += 1
+                            send_ui("log", text=f"   ⚠️ [{i}/{len(urls)}] couldn't delete pending: {gname}")
+                        await sleep(rand_delay(3, 6))
+                        continue
+                    elif repost_pending:
                         # Delete-&-repost mode: pending post delete karo, phir USI
                         # group par post LAZMI (chahe delete confirm ho ya glitch).
                         send_ui("log", text=f"   🔁 [{i}/{len(urls)}] pending found — "
@@ -5606,9 +5633,6 @@ async def _autopost_main(config, use_rules=False, repost_pending=False):
                         send_ui("log", text=(f"   🗑️ [{i}/{len(urls)}] pending deleted — posting in SAME group: {gname}"
                                              if _deleted else
                                              f"   ⚠️ [{i}/{len(urls)}] delete uncertain (glitch) — posting anyway: {gname}"))
-                        # MANDATORY: delete ke baad USI group par wapas aa ke post
-                        # karo — skip bilkul nahi (Muzammil: "ek martaba delete ki
-                        # to us group mein post karna lazmi hai"). Phir loop next.
                         try:
                             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
                             await sleep(rand_delay(2.5, 4))
@@ -5617,12 +5641,22 @@ async def _autopost_main(config, use_rules=False, repost_pending=False):
                         except Exception:
                             pass
                         # (continue NAHI — neeche membership + post chalega)
+                    elif post_pending:
+                        # Post-on-all (incl. pending): pending wale ko skip MAT karo,
+                        # seedha post karo (delete bhi nahi). Neeche post flow chalega.
+                        send_ui("log", text=f"   ➕ [{i}/{len(urls)}] pending group — posting anyway: {gname}")
+                        # (continue NAHI — neeche post chalega)
                     else:
                         _mark_posted(url)
                         send_ui("log", text=f"   ⏭️ [{i}/{len(urls)}] already pending admin approval "
                                             f"— not posting again: {gname}")
                         await sleep(rand_delay(3, 6))
                         continue
+
+                # Delete-only mode: non-pending groups mein kuch nahi karna — skip.
+                if delete_only:
+                    await sleep(rand_delay(1.5, 3))
+                    continue
 
                 # ── MEMBERSHIP CHECK (precise) ────────────────────
                 # Sirf un groups mein post karo jinke account ASAL MEMBER hai.
@@ -5821,6 +5855,26 @@ def run_autopost_repost(config):
         asyncio.run(_autopost_main(config, repost_pending=True))
     except Exception as e:
         send_ui("log", text=f"auto-post (repost) error: {str(e)[:100]}")
+        send_ui("autopost_done")
+
+
+def run_delete_all_pending(config):
+    """SIRF delete: har joined group ka pending (admin-approval) post delete
+    kare — koi post nahi. (Pehle sab delete, phir alag se post — decoupled.)"""
+    try:
+        asyncio.run(_autopost_main(config, delete_only=True))
+    except Exception as e:
+        send_ui("log", text=f"delete-all-pending error: {str(e)[:100]}")
+        send_ui("autopost_done")
+
+
+def run_autopost_postpending(config):
+    """Post on ALL groups INCL. pending: pending wale groups ko bhi skip nahi
+    karta — sab par post karta hai (delete bhi nahi)."""
+    try:
+        asyncio.run(_autopost_main(config, post_pending=True))
+    except Exception as e:
+        send_ui("log", text=f"post-all error: {str(e)[:100]}")
         send_ui("autopost_done")
 
 

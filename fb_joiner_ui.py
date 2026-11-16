@@ -448,6 +448,10 @@ class H(BaseHTTPRequestHandler):
             self._json(self._start_autopost(d, use_rules=True))
         elif u.path == "/api/autopost_repost":
             self._json(self._start_autopost(d, repost=True))
+        elif u.path == "/api/delete_all_pending":
+            self._json(self._start_autopost(d, delete_only=True))
+        elif u.path == "/api/autopost_postpending":
+            self._json(self._start_autopost(d, post_pending=True))
         elif u.path == "/api/autocomment":
             self._json(self._start_autocomment(d))
         elif u.path == "/api/autoscroll":
@@ -561,14 +565,14 @@ class H(BaseHTTPRequestHandler):
             return {"error": "Save failed: " + str(e)[:80]}
         return {"ok": True, "path": path, "name": safe}
 
-    def _start_autopost(self, d, use_rules=False, repost=False):
+    def _start_autopost(self, d, use_rules=False, repost=False,
+                        delete_only=False, post_pending=False):
         info = _lic_info()
         if not info.get("ok"):
             return {"error": info.get("error") or "License required"}
-        # Gate: Rules/Repost = developer, normal auto-post = admin. (Per-employee
-        # TRIAL key apni window mein admin+developer ON kar deti hai -> pass.
-        # Global "sabke liye" trial hata diya gaya.)
-        if repost or use_rules:
+        # Gate: Rules/Repost/Delete-all/Post-all = developer; normal auto-post =
+        # admin. (TRIAL key apni window mein admin+developer ON kar deti hai.)
+        if repost or use_rules or delete_only or post_pending:
             if not info.get("developer"):
                 return {"error": "🔒 Only for developers."}
         elif not info.get("admin"):
@@ -579,7 +583,7 @@ class H(BaseHTTPRequestHandler):
         if _running:
             return {"error": "Joining is running — press STOP first, then Auto Post."}
         msg = (d.get("post_message") or "").strip()
-        if not msg:
+        if not msg and not delete_only:   # delete-only ko message ki zaroorat nahi
             return {"error": "Post text is empty — write the post first."}
         img = (d.get("post_image") or "").strip()
         if img and not os.path.exists(img):
@@ -601,16 +605,26 @@ class H(BaseHTTPRequestHandler):
         B.stop_event.clear(); B.user_stop_event.clear()
         with _LK:
             STATE["busy"] = True
-            STATE["area"] = ("📢🔁 Auto-post (delete & repost pending) — refreshing pending posts"
+            STATE["area"] = ("🗑️ Delete All Pending Posts — deleting pending in each group"
+                             if delete_only else
+                             "📢 Post on ALL groups (incl. pending) — posting everywhere"
+                             if post_pending else
+                             "📢🔁 Auto-post (delete & repost pending) — refreshing pending posts"
                              if repost else
                              "📢📋 Auto-post (group rules) — adjusting each post to the group's rules"
                              if use_rules else
                              "📢 Auto-post — posting to your joined groups")
-        _fn = (B.run_autopost_repost if repost else
+        _fn = (B.run_delete_all_pending if delete_only else
+               B.run_autopost_postpending if post_pending else
+               B.run_autopost_repost if repost else
                B.run_autopost_rules if use_rules else
                B.run_autopost)
         threading.Thread(target=_fn, args=(cfg,), daemon=True).start()
-        return {"ok": True, "msg": ("Auto-post (delete & repost pending) started — pending posts will be deleted and re-posted."
+        return {"ok": True, "msg": ("Delete All Pending started — pending posts will be deleted in every group (no posting)."
+                                    if delete_only else
+                                    "Post on ALL groups (incl. pending) started — posting everywhere, pending groups not skipped."
+                                    if post_pending else
+                                    "Auto-post (delete & repost pending) started — pending posts will be deleted and re-posted."
                                     if repost else
                                     "Auto-post (with group rules) started — each post is adjusted to the group's rules."
                                     if use_rules else
