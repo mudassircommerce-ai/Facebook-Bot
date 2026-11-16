@@ -331,7 +331,8 @@
           <button class="obtn" id="btnLogout"><span class="bi">🚪</span> Log out of Facebook</button>
           <button class="obtn" id="btnAutopost"><span class="bi">📢</span> Auto Post on Page</button>
           <button class="obtn" id="btnAutopostRules"><span class="bi">📋</span> Auto Post (with Group Rules)</button>
-          <button class="obtn" id="btnAutopostRepost"><span class="bi">🔁</span> Auto Post (Delete &amp; Repost Pending)</button>
+          <button class="obtn" id="btnDeleteAllPending"><span class="bi">🗑️</span> Delete All Pending Posts</button>
+          <button class="obtn" id="btnPostAllPending"><span class="bi">📢</span> Post on all groups (incl. Pending)</button>
           <button class="obtn" id="btnAutocomment" style="display:none;"><span class="bi">💬</span> Auto-Comment on Approvals</button>
           <button class="obtn" id="btnPreflight"><span class="bi">🔎</span> Pre-flight Check</button>
           <button class="start" id="btnStart">▶  START BOT</button>
@@ -548,11 +549,16 @@ $("#btnAutopostRules").onclick=async()=>{
   if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
   const r=await api("/api/autopost_rules",{post_message:msg,page_link:$("#page").value.trim()});
   toast(r.error||r.msg||"…");};
-$("#btnAutopostRepost").onclick=async()=>{
+$("#btnDeleteAllPending").onclick=async()=>{
+  if(!window._isDeveloper){toast("🔒 Only for developers");return;}
+  if(!confirm("Delete ALL your pending posts in every joined group? (No posting — just delete.)"))return;
+  const r=await api("/api/delete_all_pending",{page_link:$("#page").value.trim()});
+  toast(r.error||r.msg||"…");};
+$("#btnPostAllPending").onclick=async()=>{
   if(!window._isDeveloper){toast("🔒 Only for developers");return;}
   const msg=($("#apmsg").value||"").trim();
   if(!msg){toast("✍️ Write the auto-post text first");$("#apmsg").focus();return;}
-  const r=await api("/api/autopost_repost",{post_message:msg,page_link:$("#page").value.trim()});
+  const r=await api("/api/autopost_postpending",{post_message:msg,page_link:$("#page").value.trim()});
   toast(r.error||r.msg||"…");};
 $("#btnAutocomment").onclick=async()=>{
   if(!window._isAdmin){toast("🔒 Only for Admins");return;}
