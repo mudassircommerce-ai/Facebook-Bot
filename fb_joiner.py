@@ -5608,7 +5608,8 @@ async def _autopost_main(config, use_rules=False, repost_pending=False,
                         or "your pending post" in _full):
                     if delete_only:
                         # Delete-only mode: pending post delete karo aur agle group
-                        # par jao (koi post nahi).
+                        # par jao (koi post nahi). REST: har delete ke beech ~20-40s
+                        # gap, aur har 25 deletes ke baad 10 min break (ban-safe).
                         try:
                             _deleted = await _delete_pending_post(page, url)
                         except Exception:
@@ -5616,10 +5617,20 @@ async def _autopost_main(config, use_rules=False, repost_pending=False,
                         if _deleted:
                             done += 1
                             send_ui("log", text=f"   🗑️ [{i}/{len(urls)}] pending post deleted: {gname}")
+                            config["_del_since_rest"] = config.get("_del_since_rest", 0) + 1
+                            if config["_del_since_rest"] >= AUTOPOST_POSTS_PER_REST:
+                                config["_del_since_rest"] = 0
+                                _dmins = AUTOPOST_BATCH_REST_SEC // 60
+                                send_ui("log", text=f"   💤 {AUTOPOST_POSTS_PER_REST} deletes done — "
+                                                    f"resting {_dmins} min, then continuing…")
+                                _de = time.time() + AUTOPOST_BATCH_REST_SEC
+                                while time.time() < _de and not stop_event.is_set():
+                                    await asyncio.sleep(5)
                         else:
                             fails += 1
                             send_ui("log", text=f"   ⚠️ [{i}/{len(urls)}] couldn't delete pending: {gname}")
-                        await sleep(rand_delay(3, 6))
+                        if not stop_event.is_set():
+                            await sleep(rand_delay(20, 40))   # har delete ke beech gap
                         continue
                     elif repost_pending:
                         # Delete-&-repost mode: pending post delete karo, phir USI
